@@ -2147,6 +2147,27 @@ app.patch('/api/admin/vehicles/:id/status', authRequired, requireRole('SUPER_ADM
   );
 });
 
+// Helper function to check if port is available
+const checkPortAvailable = (port, callback) => {
+  const net = require('net');
+  const server = net.createServer();
+  
+  server.listen(port, () => {
+    server.once('close', () => {
+      callback(null, true);
+    });
+    server.close();
+  });
+  
+  server.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      callback(null, false);
+    } else {
+      callback(err, false);
+    }
+  });
+};
+
 // Start server - wait for database to be ready
 waitForDb((dbErr) => {
   if (dbErr) {
@@ -2155,9 +2176,41 @@ waitForDb((dbErr) => {
     process.exit(1);
   }
   
-app.listen(PORT, () => {
-  console.log(`Backend running on http://localhost:${PORT}`);
-    console.log('[SERVER] Ready to accept requests');
-    console.log('[SERVER] Test login endpoint: POST http://localhost:4000/api/auth/login');
+  // Check if port is available before starting
+  checkPortAvailable(PORT, (err, isAvailable) => {
+    if (err) {
+      console.error('[SERVER] Error checking port:', err);
+      process.exit(1);
+    }
+    
+    if (!isAvailable) {
+      console.error(`[SERVER] ❌ Port ${PORT} is already in use!`);
+      console.error(`[SERVER] Please either:`);
+      console.error(`[SERVER]   1. Stop the other process using port ${PORT}`);
+      console.error(`[SERVER]   2. Or change PORT in server.js to a different port`);
+      console.error(`[SERVER] To find the process: netstat -ano | findstr :${PORT}`);
+      console.error(`[SERVER] To kill all Node processes: Get-Process node | Stop-Process -Force`);
+      process.exit(1);
+    }
+    
+    const server = app.listen(PORT, () => {
+      console.log(`[SERVER] ✅ Backend running on http://localhost:${PORT}`);
+      console.log('[SERVER] Ready to accept requests');
+      console.log('[SERVER] Test login endpoint: POST http://localhost:4000/api/auth/login');
+    });
+    
+    server.on('error', (err) => {
+      if (err.code === 'EADDRINUSE') {
+        console.error(`[SERVER] ❌ Port ${PORT} is already in use!`);
+        console.error(`[SERVER] Please either:`);
+        console.error(`[SERVER]   1. Stop the other process using port ${PORT}`);
+        console.error(`[SERVER]   2. Or change PORT in server.js to a different port`);
+        console.error(`[SERVER] To find the process: netstat -ano | findstr :${PORT}`);
+        console.error(`[SERVER] To kill it: taskkill /F /PID <process_id>`);
+      } else {
+        console.error('[SERVER] ❌ Server error:', err);
+      }
+      process.exit(1);
+    });
   });
 });
