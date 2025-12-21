@@ -1,0 +1,152 @@
+<script setup>
+import { ref, onMounted, computed, watch } from 'vue';
+import { useAuth } from './composables/useAuth';
+import { useToast } from './composables/useToast';
+import AppLayout from './components/AppLayout.vue';
+import LoginPage from './pages/LoginPage.vue';
+import CarBookingPage from './pages/CarBookingPage.vue';
+// TODO: Import remaining pages when created
+// import ITRequestPage from './pages/ITRequestPage.vue';
+// import OnboardingPage from './pages/OnboardingPage.vue';
+// import MyRequestsPage from './pages/MyRequestsPage.vue';
+// import AdminPage from './pages/AdminPage.vue';
+
+const { isLoggedIn, currentUser, checkAuth, clearAuth } = useAuth();
+const { toasts, showToast, removeToast } = useToast();
+
+const currentTab = ref('car');
+
+// Check auth on mount
+onMounted(() => {
+  checkAuth();
+  // Set default tab based on role
+  if (isLoggedIn.value && currentUser.value) {
+    const role = currentUser.value.role;
+    if (['SUPER_ADMIN', 'IT_ADMIN', 'HR_ADMIN', 'FLEET_ADMIN'].includes(role)) {
+      currentTab.value = 'requests';
+    } else {
+      currentTab.value = 'car';
+    }
+  }
+});
+
+// Handle login success
+const handleLoginSuccess = (user) => {
+  // Set default tab
+  if (['SUPER_ADMIN', 'IT_ADMIN', 'HR_ADMIN', 'FLEET_ADMIN'].includes(user.role)) {
+    currentTab.value = 'requests';
+  } else {
+    currentTab.value = 'car';
+  }
+};
+
+// Handle logout
+const handleLogout = () => {
+  clearAuth();
+  currentTab.value = 'car';
+};
+
+// Handle tab change
+const handleTabChange = (tab) => {
+  currentTab.value = tab;
+};
+
+// Handle request submission (reload requests list)
+const handleRequestSubmitted = () => {
+  // This will trigger MyRequestsPage to reload if it's active
+  // For now, just show a message
+  showToast('Request submitted successfully!', 'success');
+};
+</script>
+
+<template>
+  <div class="app-container">
+    <div class="bg-shape shape-1"></div>
+    <div class="bg-shape shape-2"></div>
+
+    <!-- Login Screen -->
+    <LoginPage v-if="!isLoggedIn" @login-success="handleLoginSuccess" />
+
+    <!-- Portal (shown when logged in) -->
+    <AppLayout 
+      v-else
+      :current-tab="currentTab"
+      @logout="handleLogout"
+      @tab-change="handleTabChange"
+    >
+      <transition name="fade" mode="out-in">
+        <!-- Car Booking Page -->
+        <CarBookingPage 
+          v-if="currentTab === 'car'"
+          @submitted="handleRequestSubmitted"
+        />
+
+        <!-- TODO: Replace with page components when created -->
+        <!-- IT Request Page -->
+        <div v-else-if="currentTab === 'it'" class="glass-card">
+          <div class="card-header">
+            <h2>IT Support & Assets</h2>
+            <p class="subtitle">Report technical issues or request hardware/software.</p>
+          </div>
+          <p style="padding: 2rem; text-align: center; color: var(--shc-text-secondary);">
+            IT Request page component - To be extracted from App.vue
+          </p>
+        </div>
+
+        <!-- Onboarding Page -->
+        <div v-else-if="currentTab === 'onboarding'" class="glass-card">
+          <div class="card-header">
+            <h2>New Employee Onboarding</h2>
+            <p class="subtitle">Initiate onboarding process for new hires.</p>
+          </div>
+          <p style="padding: 2rem; text-align: center; color: var(--shc-text-secondary);">
+            Onboarding page component - To be extracted from App.vue
+          </p>
+        </div>
+
+        <!-- My Requests Page -->
+        <div v-else-if="currentTab === 'requests'" class="glass-card">
+          <div class="card-header">
+            <h2>{{ isAdminUser ? 'All Requests' : 'My Requests' }}</h2>
+            <p class="subtitle">Track the status of your submissions</p>
+          </div>
+          <p style="padding: 2rem; text-align: center; color: var(--shc-text-secondary);">
+            My Requests page component - To be extracted from App.vue
+          </p>
+        </div>
+
+        <!-- Admin Page -->
+        <div v-else-if="currentTab === 'admin'" class="glass-card">
+          <div class="card-header">
+            <h2>Admin Panel</h2>
+            <p class="subtitle">System administration</p>
+          </div>
+          <p style="padding: 2rem; text-align: center; color: var(--shc-text-secondary);">
+            Admin page component - To be extracted from App.vue
+          </p>
+        </div>
+      </transition>
+    </AppLayout>
+
+    <!-- Toast Notifications -->
+    <div class="toast-container">
+      <transition-group name="toast" tag="div">
+        <div
+          v-for="toast in toasts"
+          :key="toast.id"
+          :class="['toast', `toast-${toast.type}`]"
+          @click="removeToast(toast.id)"
+        >
+          <span class="toast-message">{{ toast.message }}</span>
+          <button class="toast-close" @click.stop="removeToast(toast.id)">×</button>
+        </div>
+      </transition-group>
+    </div>
+  </div>
+</template>
+
+<style>
+/* Import existing styles from original App.vue */
+/* All styles remain the same - they're just organized differently */
+</style>
+

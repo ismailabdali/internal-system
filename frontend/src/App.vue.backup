@@ -1,0 +1,3290 @@
+<script setup>
+import { ref, onMounted, computed, watch } from 'vue';
+
+const currentTab = ref('car'); // 'car' | 'it' | 'onboarding' | 'requests' | 'admin'
+
+const apiBase = 'http://localhost:4000/api';
+
+
+// ---- Authentication ----
+const isLoggedIn = ref(false);
+const currentUser = ref(null);
+const authToken = ref(null);
+
+// Role-based computed properties
+const userRole = computed(() => currentUser.value?.role || 'EMPLOYEE');
+const isSuperAdmin = computed(() => userRole.value === 'SUPER_ADMIN');
+const isITAdmin = computed(() => userRole.value === 'IT_ADMIN');
+const isHRAdmin = computed(() => userRole.value === 'HR_ADMIN');
+const isFleetAdmin = computed(() => userRole.value === 'FLEET_ADMIN');
+const isAdminUser = computed(() => {
+  return ['SUPER_ADMIN', 'IT_ADMIN', 'HR_ADMIN', 'FLEET_ADMIN'].includes(userRole.value);
+});
+const isLead = computed(() => currentUser.value?.isLead || false);
+
+// Role-based tab visibility
+const availableTabs = computed(() => {
+  const tabs = [];
+  const role = userRole.value;
+  
+  // All users can access these
+  tabs.push('requests');
+  
+  // Role-specific tabs
+  if (role === 'SUPER_ADMIN' || role === 'FLEET_ADMIN' || role === 'EMPLOYEE') {
+    tabs.push('car');
+  }
+  
+  if (role === 'SUPER_ADMIN' || role === 'IT_ADMIN' || role === 'EMPLOYEE') {
+    tabs.push('it');
+  }
+  
+  // Onboarding: only leads, HR_ADMIN, or SUPER_ADMIN
+  if (isLead.value || role === 'HR_ADMIN' || role === 'SUPER_ADMIN') {
+    tabs.push('onboarding');
+  }
+  
+  // Admin panel: only admins
+  if (isAdminUser.value) {
+    tabs.push('admin');
+  }
+  
+  return tabs;
+});
+
+// Role-based permissions
+const canManageEmployees = computed(() => isSuperAdmin.value || isHRAdmin.value);
+const canManageVehicles = computed(() => isSuperAdmin.value || isFleetAdmin.value);
+const canManageAllRequests = computed(() => isAdminUser.value);
+const canViewEmployeeId = computed(() => isAdminUser.value);
+
+// Helper function to get tab label
+const getTabLabel = (tab) => {
+  const labels = {
+    'car': 'Car Booking',
+    'it': 'IT Request',
+    'onboarding': 'Onboarding',
+    'requests': 'My Requests',
+    'admin': 'Admin'
+  };
+  return labels[tab] || tab;
+};
+
+
+// Helper function to get auth headers
+const getAuthHeaders = () => {
+  const headers = { 'Content-Type': 'application/json' };
+  if (authToken.value) {
+    headers['Authorization'] = `Bearer ${authToken.value}`;
+  }
+  return headers;
+};
+
+// Login form
+const loginForm = ref({
+  email: '',
+  password: ''
+});
+const loginError = ref('');
+const isLoggingIn = ref(false);
+
+// Check localStorage on mount
+const checkAuth = () => {
+  const storedToken = localStorage.getItem('authToken');
+  const storedUser = localStorage.getItem('currentUser');
+  
+  if (storedToken && storedUser) {
+    try {
+      authToken.value = storedToken;
+      currentUser.value = JSON.parse(storedUser);
+      isLoggedIn.value = true;
+      // Verify token is still valid
+      verifyToken();
+    } catch (e) {
+      console.error('Error parsing stored user data', e);
+      clearAuth();
+    }
+  }
+};
+
+// Verify token with backend
+const verifyToken = async () => {
+  try {
+    const res = await fetch(`${apiBase}/auth/me`, {
+      headers: {
+        'Authorization': `Bearer ${authToken.value}`
+      }
+    });
+    if (!res.ok) {
+      clearAuth();
+      return;
+    }
+    const user = await res.json();
+    currentUser.value = user;
+    // Default tab based on role after token verification
+    currentTab.value = (user?.role && ['SUPER_ADMIN', 'IT_ADMIN', 'HR_ADMIN', 'FLEET_ADMIN'].includes(user.role))
+      ? 'requests'
+      : 'car';
+
+    localStorage.setItem('currentUser', JSON.stringify(user));
+  } catch (e) {
+    console.error('Token verification failed', e);
+    clearAuth();
+  }
+};
+
+// Login function
+const handleLogin = async () => {
+  loginError.value = '';
+  isLoggingIn.value = true;
+  
+  try {
+    // Validate form before sending
+    if (!loginForm.value.email || !loginForm.value.email.trim()) {
+      loginError.value = 'Email is required';
+      isLoggingIn.value = false;
+      return;
+    }
+    if (!loginForm.value.password || !loginForm.value.password.trim()) {
+      loginError.value = 'Password is required';
+      isLoggingIn.value = false;
+      return;
+    }
+    
+    console.log('[LOGIN] Attempting login for:', loginForm.value.email);
+    
+    // Create AbortController for timeout
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
+    
+    try {
+      const res = await fetch(`${apiBase}/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: loginForm.value.email.trim(),
+          password: loginForm.value.password
+        }),
+        signal: controller.signal
+      });
+      clearTimeout(timeoutId);
+      
+      console.log('[LOGIN] Response status:', res.status, res.statusText);
+      
+      // Read response body once - can only be consumed once
+      let data;
+      const contentType = res.headers.get('content-type') || '';
+      
+      if (contentType.includes('application/json')) {
+        try {
+          data = await res.json();
+          console.log('[LOGIN] Response parsed:', { 
+            hasToken: !!data.token, 
+            hasUser: !!data.user,
+            userEmail: data.user?.email,
+            userRole: data.user?.role
+          });
+        } catch (parseError) {
+          console.error('[LOGIN] Failed to parse JSON:', parseError);
+          throw new Error('Invalid response format from server.');
+        }
+      } else {
+        const text = await res.text();
+        console.error('[LOGIN] Non-JSON response:', text.substring(0, 200));
+        throw new Error('Server returned invalid response format.');
+      }
+      
+      // Check if response is ok
+      if (!res.ok) {
+        console.error('[LOGIN] Login failed:', data);
+        throw new Error(data.error || `Login failed (${res.status})`);
+      }
+      
+      // Validate response structure
+      if (!data || !data.token || !data.user) {
+        console.error('[LOGIN] Invalid response structure:', data);
+        throw new Error('Invalid response from server. Missing token or user data.');
+      }
+      
+      console.log('[LOGIN] Login successful!', data.user);
+      
+      // Store token and user info FIRST
+      authToken.value = data.token;
+      currentUser.value = data.user;
+      
+      localStorage.setItem('authToken', data.token);
+      localStorage.setItem('currentUser', JSON.stringify(data.user));
+      
+      // Clear form and errors
+      loginForm.value.email = '';
+      loginForm.value.password = '';
+      loginError.value = '';
+      
+      // Default tab after login
+      currentTab.value = (data.user?.role && ['SUPER_ADMIN', 'IT_ADMIN', 'HR_ADMIN', 'FLEET_ADMIN'].includes(data.user.role))
+        ? 'requests'
+        : 'car';
+
+      // Login successful - update UI state IMMEDIATELY
+      // This must happen before any other async operations
+      isLoggedIn.value = true;
+      
+      console.log('[LOGIN] Login complete! Token stored, UI updated');
+      
+      // Load requests after login in background (non-blocking)
+      // Use nextTick to ensure Vue has updated the reactive state
+      setTimeout(() => {
+        console.log('[LOGIN] Loading requests in background...');
+        loadRequests().catch(e => {
+          console.warn('[LOGIN] Failed to load requests after login:', e);
+          // Don't show error to user - login was successful
+        });
+      }, 200);
+    } catch (fetchError) {
+      clearTimeout(timeoutId);
+      throw fetchError;
+    }
+  } catch (e) {
+    console.error('[LOGIN] Login error:', e);
+    console.error('[LOGIN] Error name:', e.name);
+    console.error('[LOGIN] Error message:', e.message);
+    console.error('[LOGIN] Error stack:', e.stack);
+    if (e.name === 'AbortError' || e.message.includes('aborted')) {
+      loginError.value = 'Login request timed out. Please check your connection and try again.';
+    } else if (e.message.includes('Failed to fetch') || e.message.includes('NetworkError') || e.message.includes('ERR_')) {
+      loginError.value = 'Cannot connect to server. Please ensure the backend server is running on port 4000.';
+    } else {
+      loginError.value = e.message || 'Login failed. Please check your credentials and try again.';
+    }
+    isLoggedIn.value = false;
+  } finally {
+    isLoggingIn.value = false;
+  }
+};
+
+// Logout function
+const handleLogout = () => {
+  clearAuth();
+  currentTab.value = 'car';
+  requests.value = [];
+  // Reset all forms
+  carForm.value.requesterName = '';
+  carForm.value.department = '';
+  itForm.value.requesterName = '';
+  itForm.value.department = '';
+  onboardingForm.value.requesterName = '';
+  onboardingForm.value.department = '';
+};
+
+// Clear authentication
+const clearAuth = () => {
+  isLoggedIn.value = false;
+  currentUser.value = null;
+  authToken.value = null;
+  localStorage.removeItem('authToken');
+  localStorage.removeItem('currentUser');
+};
+
+// Auto-fill forms with user info
+const fillFormWithUserInfo = () => {
+  if (currentUser.value) {
+    const userDept = currentUser.value.department || '';
+    const userName = currentUser.value.fullName || '';
+    
+    // Auto-fill car form (always update when switching to this tab)
+    if (currentTab.value === 'car') {
+      carForm.value.requesterName = userName;
+      carForm.value.department = userDept;
+    }
+    
+    // Auto-fill IT form (always update when switching to this tab)
+    if (currentTab.value === 'it') {
+      itForm.value.requesterName = userName;
+      itForm.value.department = userDept;
+    }
+    
+    // Auto-fill onboarding form (always update when switching to this tab)
+    if (currentTab.value === 'onboarding') {
+      onboardingForm.value.requesterName = userName;
+      onboardingForm.value.department = userDept;
+    }
+  }
+};
+
+// Watch for user changes to auto-fill forms
+watch(currentUser, () => {
+  if (currentUser.value) {
+    fillFormWithUserInfo();
+  }
+}, { immediate: true });
+
+// Watch for tab changes to auto-fill when switching tabs
+watch(currentTab, (tab) => {
+  if (isLoggedIn.value) {
+    fillFormWithUserInfo();
+    
+    // Load admin data when admin tab is accessed
+    if (tab === 'admin' && isAdminUser.value) {
+      loadEmployees();
+      loadAdminVehicles();
+    } else if (tab === 'car') {
+      // Reload active vehicles for car booking form
+      loadVehicles();
+    }
+  }
+});
+
+// ---- Shared ----
+const requests = ref([]);
+const isLoadingRequests = ref(false);
+const requestError = ref('');
+const searchQuery = ref('');
+const statusFilter = ref('all');
+const typeFilter = ref('all');
+const selectedRequest = ref(null);
+const showRequestModal = ref(false);
+
+// Department options
+const departments = [
+  'Web Development',
+  'IT Support',
+  'HR',
+  'Finance',
+  'Operations',
+  'Management',
+  'Engineering',
+  'Administration',
+  'Programmer'
+];
+
+const loadRequests = async () => {
+  isLoadingRequests.value = true;
+  requestError.value = '';
+  try {
+    const res = await fetch(`${apiBase}/requests`, {
+      headers: getAuthHeaders()
+    });
+    if (res.status === 401) {
+      clearAuth();
+      showToast('Your session has expired. Please log in again.', 'error', 8000);
+      return;
+    }
+    if (!res.ok) {
+      const data = await res.json();
+      throw new Error(data.error || 'Failed to load requests');
+    }
+    requests.value = await res.json();
+  } catch (e) {
+    requestError.value = e.message;
+    showToast(e.message, 'error');
+  } finally {
+    isLoadingRequests.value = false;
+  }
+};
+
+const loadRequestDetails = async (requestId) => {
+  try {
+    const res = await fetch(`${apiBase}/requests/${requestId}`, {
+      headers: getAuthHeaders()
+    });
+    if (res.status === 401) {
+      clearAuth();
+      showToast('Your session has expired. Please log in again.', 'error', 8000);
+      return;
+    }
+    if (!res.ok) {
+      const data = await res.json();
+      throw new Error(data.error || 'Failed to load request details');
+    }
+    selectedRequest.value = await res.json();
+    showRequestModal.value = true;
+  } catch (e) {
+    requestError.value = e.message;
+    showToast(e.message, 'error');
+  }
+};
+
+const updatingStatus = ref(false);
+const updateRequestStatus = async (requestId, newStatus) => {
+  updatingStatus.value = true;
+  try {
+    const res = await fetch(`${apiBase}/requests/${requestId}/status`, {
+      method: 'PATCH',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ status: newStatus })
+    });
+    if (res.status === 401) {
+      clearAuth();
+      showToast('Your session has expired. Please log in again.', 'error', 8000);
+      return;
+    }
+    if (!res.ok) {
+      const data = await res.json();
+      throw new Error(data.error || 'Failed to update request status');
+    }
+    const data = await res.json();
+    
+    // Show success message with auto-IT creation info if applicable
+    if (data.autoITRequestCreated) {
+      showToast(`Status updated to ${newStatus}. IT request #${data.autoITRequestId} auto-created for device setup!`, 'success', 10000);
+    } else {
+      showToast(`Request status updated to ${newStatus}`, 'success');
+    }
+    
+    // Reload request details and list
+    await loadRequestDetails(requestId);
+    await loadRequests();
+  } catch (e) {
+    showToast(e.message, 'error', 8000);
+  } finally {
+    updatingStatus.value = false;
+  }
+};
+
+const filteredRequests = computed(() => {
+  let filtered = requests.value;
+  
+  // Filter by search query
+  if (searchQuery.value) {
+    const query = searchQuery.value.toLowerCase();
+    filtered = filtered.filter(r => 
+      r.title?.toLowerCase().includes(query) ||
+      r.requesterName?.toLowerCase().includes(query) ||
+      r.id.toString().includes(query) ||
+      r.description?.toLowerCase().includes(query)
+    );
+  }
+  
+  // Filter by status
+  if (statusFilter.value !== 'all') {
+    filtered = filtered.filter(r => r.status === statusFilter.value);
+  }
+  
+  // Filter by type
+  if (typeFilter.value !== 'all') {
+    filtered = filtered.filter(r => r.type === typeFilter.value);
+  }
+  
+  return filtered;
+});
+
+// Toast notification system
+const toasts = ref([]);
+let toastIdCounter = 0;
+
+const showToast = (message, type = 'success', duration = 5000) => {
+  const id = toastIdCounter++;
+  const toast = {
+    id,
+    message,
+    type, // 'success', 'error', 'info', 'warning'
+    duration
+  };
+  toasts.value.push(toast);
+  
+  setTimeout(() => {
+    removeToast(id);
+  }, duration);
+};
+
+const removeToast = (id) => {
+  const index = toasts.value.findIndex(t => t.id === id);
+  if (index > -1) {
+    toasts.value.splice(index, 1);
+  }
+};
+
+const autoDismissMessage = (messageRef, delay = 5000) => {
+  setTimeout(() => {
+    messageRef.value = '';
+  }, delay);
+};
+
+onMounted(() => {
+  checkAuth();
+  if (isLoggedIn.value) {
+    loadRequests();
+    loadVehicles();
+  }
+});
+
+// Watch for login to load vehicles
+watch(isLoggedIn, (loggedIn) => {
+  if (loggedIn) {
+    loadVehicles();
+  }
+});
+
+// ---- Admin Panel ----
+const employees = ref([]);
+const isLoadingEmployees = ref(false);
+
+const loadEmployees = async () => {
+  isLoadingEmployees.value = true;
+  try {
+    const res = await fetch(`${apiBase}/admin/employees`, {
+      headers: getAuthHeaders()
+    });
+    if (!res.ok) {
+      const data = await res.json();
+      throw new Error(data.error || 'Failed to load employees');
+    }
+    employees.value = await res.json();
+  } catch (e) {
+    console.error('Error loading employees:', e);
+    showToast(e.message, 'error');
+    employees.value = [];
+  } finally {
+    isLoadingEmployees.value = false;
+  }
+};
+
+const activateEmployee = async (employeeId) => {
+  try {
+    const res = await fetch(`${apiBase}/admin/employees/${employeeId}/activate`, {
+      method: 'PATCH',
+      headers: getAuthHeaders()
+    });
+    if (!res.ok) {
+      const data = await res.json();
+      throw new Error(data.error || 'Failed to activate employee');
+    }
+    showToast('Employee activated successfully', 'success');
+    await loadEmployees();
+  } catch (e) {
+    console.error('Error activating employee:', e);
+    showToast(e.message, 'error');
+  }
+};
+
+const editingEmployee = ref(null);
+const employeeEditForm = ref({
+  role: '',
+  department: '',
+  isLead: false
+});
+
+const startEditEmployee = (employee) => {
+  editingEmployee.value = employee.id;
+  employeeEditForm.value.role = employee.role;
+  employeeEditForm.value.department = employee.department || '';
+  employeeEditForm.value.isLead = employee.isLead || false;
+};
+
+const cancelEditEmployee = () => {
+  editingEmployee.value = null;
+  employeeEditForm.value = { role: '', department: '', isLead: false };
+};
+
+const saveEmployee = async (employeeId) => {
+  try {
+    const res = await fetch(`${apiBase}/admin/employees/${employeeId}`, {
+      method: 'PATCH',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(employeeEditForm.value)
+    });
+    if (res.status === 401) {
+      clearAuth();
+      showToast('Your session has expired. Please log in again.', 'error', 8000);
+      return;
+    }
+    if (!res.ok) {
+      const data = await res.json();
+      throw new Error(data.error || 'Failed to update employee');
+    }
+    showToast('Employee updated successfully', 'success');
+    editingEmployee.value = null;
+    await loadEmployees();
+  } catch (e) {
+    console.error('Error updating employee:', e);
+    showToast(e.message, 'error');
+  }
+};
+
+// Create new employee
+const newEmployeeForm = ref({
+  email: '',
+  password: '',
+  fullName: '',
+  department: '',
+  role: 'EMPLOYEE',
+  isLead: false
+});
+const isCreatingEmployee = ref(false);
+
+const createEmployee = async () => {
+  if (!newEmployeeForm.value.email || !newEmployeeForm.value.password || !newEmployeeForm.value.fullName) {
+    showToast('Email, password, and full name are required', 'error');
+    return;
+  }
+  
+  isCreatingEmployee.value = true;
+  try {
+    const res = await fetch(`${apiBase}/admin/employees`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(newEmployeeForm.value)
+    });
+    if (res.status === 401) {
+      clearAuth();
+      showToast('Your session has expired. Please log in again.', 'error', 8000);
+      return;
+    }
+    if (!res.ok) {
+      const data = await res.json();
+      throw new Error(data.error || 'Failed to create employee');
+    }
+    showToast('Employee created successfully', 'success');
+    newEmployeeForm.value = {
+      email: '',
+      password: '',
+      fullName: '',
+      department: '',
+      role: 'EMPLOYEE',
+      isLead: false
+    };
+    await loadEmployees();
+  } catch (e) {
+    console.error('Error creating employee:', e);
+    showToast(e.message, 'error');
+  } finally {
+    isCreatingEmployee.value = false;
+  }
+};
+
+const toggleVehicleStatus = async (vehicleId, currentStatus) => {
+  try {
+    const newStatus = currentStatus === 'ACTIVE' ? 'INACTIVE' : 'ACTIVE';
+    const res = await fetch(`${apiBase}/admin/vehicles/${vehicleId}/status`, {
+      method: 'PATCH',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ status: newStatus })
+    });
+    if (!res.ok) {
+      const data = await res.json();
+      throw new Error(data.error || 'Failed to update vehicle status');
+    }
+    showToast(`Vehicle status updated to ${newStatus}`, 'success');
+    // Reload both admin vehicles and regular vehicles (for car booking form)
+    if (currentTab.value === 'admin') {
+      await loadAdminVehicles();
+    }
+    await loadVehicles();
+  } catch (e) {
+    console.error('Error updating vehicle status:', e);
+    showToast(e.message, 'error');
+  }
+};
+
+// Separate function to load vehicles for admin panel (all vehicles)
+const loadAdminVehicles = async () => {
+  isLoadingVehicles.value = true;
+  try {
+    const res = await fetch(`${apiBase}/admin/vehicles`, {
+      headers: getAuthHeaders()
+    });
+    if (!res.ok) {
+      const data = await res.json();
+      throw new Error(data.error || 'Failed to load vehicles');
+    }
+    vehicles.value = await res.json();
+  } catch (e) {
+    console.error('Error loading vehicles:', e);
+    showToast(e.message, 'error');
+    vehicles.value = [];
+  } finally {
+    isLoadingVehicles.value = false;
+  }
+};
+
+// Fleet Schedule
+const fleetSchedule = ref([]);
+const isLoadingSchedule = ref(false);
+const scheduleDateFrom = ref(new Date().toISOString().split('T')[0]);
+const scheduleDateTo = ref(new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]); // 30 days from now
+
+const loadFleetSchedule = async () => {
+  if (!canManageVehicles.value) return;
+  
+  isLoadingSchedule.value = true;
+  try {
+    const params = new URLSearchParams();
+    if (scheduleDateFrom.value) params.append('from', scheduleDateFrom.value);
+    if (scheduleDateTo.value) params.append('to', scheduleDateTo.value);
+    
+    const res = await fetch(`${apiBase}/fleet/schedule?${params.toString()}`, {
+      headers: getAuthHeaders()
+    });
+    if (res.status === 401) {
+      clearAuth();
+      showToast('Your session has expired. Please log in again.', 'error', 8000);
+      return;
+    }
+    if (!res.ok) {
+      const data = await res.json();
+      throw new Error(data.error || 'Failed to load fleet schedule');
+    }
+    fleetSchedule.value = await res.json();
+  } catch (e) {
+    console.error('Error loading fleet schedule:', e);
+    showToast(e.message, 'error');
+    fleetSchedule.value = [];
+  } finally {
+    isLoadingSchedule.value = false;
+  }
+};
+
+// Load schedule when admin tab is opened
+watch(currentTab, (tab) => {
+  if (tab === 'admin' && canManageVehicles.value) {
+    loadFleetSchedule();
+  }
+});
+
+// ---- Car booking ----
+const vehicles = ref([]);
+const isLoadingVehicles = ref(false);
+const carForm = ref({
+  requesterName: '',
+  department: '',
+  startDatetime: '',
+  endDatetime: '',
+  destination: '',
+  reason: '',
+  passengers: '',
+  vehicleId: '' // Empty string means auto-assign
+});
+const carFormErrors = ref({});
+const carMessage = ref('');
+const carError = ref('');
+const isSubmittingCar = ref(false);
+
+// Load vehicles
+const loadVehicles = async () => {
+  isLoadingVehicles.value = true;
+  try {
+    const res = await fetch(`${apiBase}/vehicles`, {
+      headers: getAuthHeaders()
+    });
+    if (!res.ok) throw new Error('Failed to load vehicles');
+    vehicles.value = await res.json();
+  } catch (e) {
+    console.error('Error loading vehicles:', e);
+    vehicles.value = [];
+  } finally {
+    isLoadingVehicles.value = false;
+  }
+};
+
+const validateCarForm = () => {
+  carFormErrors.value = {};
+  let isValid = true;
+  
+  // Requester name and department are auto-filled and read-only, so validation is minimal
+  if (!carForm.value.requesterName?.trim()) {
+    carFormErrors.value.requesterName = 'Please refresh the page if your name is missing';
+    isValid = false;
+  }
+  if (!carForm.value.department?.trim()) {
+    carFormErrors.value.department = 'Please refresh the page if your department is missing';
+    isValid = false;
+  }
+  if (!carForm.value.startDatetime) {
+    carFormErrors.value.startDatetime = 'Start date and time is required';
+    isValid = false;
+  }
+  if (!carForm.value.endDatetime) {
+    carFormErrors.value.endDatetime = 'End date and time is required';
+    isValid = false;
+  }
+  if (carForm.value.startDatetime && carForm.value.endDatetime) {
+    if (new Date(carForm.value.startDatetime) >= new Date(carForm.value.endDatetime)) {
+      carFormErrors.value.endDatetime = 'End date must be after start date';
+      isValid = false;
+    }
+  }
+  if (!carForm.value.reason?.trim()) {
+    carFormErrors.value.reason = 'Purpose of trip is required';
+    isValid = false;
+  }
+  if (!carForm.value.destination?.trim()) {
+    carFormErrors.value.destination = 'Destination is required';
+    isValid = false;
+  }
+  
+  return isValid;
+};
+
+const submitCarBooking = async () => {
+  carMessage.value = '';
+  carError.value = '';
+  carFormErrors.value = {};
+  
+  if (!validateCarForm()) {
+    return;
+  }
+  
+  isSubmittingCar.value = true;
+  try {
+    // Prepare payload - convert empty string vehicleId to null for auto-assign
+    const payload = {
+      ...carForm.value,
+      vehicleId: carForm.value.vehicleId || null
+    };
+    
+    const res = await fetch(`${apiBase}/car-bookings`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(payload)
+    });
+    if (res.status === 401) {
+      clearAuth();
+      showToast('Your session has expired. Please log in again.', 'error', 8000);
+      return;
+    }
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.error || 'Failed to book car');
+    }
+    const vehicleName = data.vehicle?.name || 'Auto-assigned';
+    showToast(`Car booked successfully! Vehicle: ${vehicleName}`, 'success');
+    // reset only time / reason
+    carForm.value.startDatetime = '';
+    carForm.value.endDatetime = '';
+    carForm.value.reason = '';
+    carForm.value.destination = '';
+    carForm.value.passengers = '';
+    carForm.value.vehicleId = '';
+    await loadRequests();
+  } catch (e) {
+    showToast(e.message, 'error', 8000);
+  } finally {
+    isSubmittingCar.value = false;
+  }
+};
+
+// ---- IT request ----
+const itForm = ref({
+  requesterName: '',
+  department: '',
+  title: '',
+  description: '',
+  category: 'Support / Incident',
+  systemName: '',
+  impact: 'Medium',
+  urgency: 'Normal',
+  assetTag: ''
+});
+const itFormErrors = ref({});
+const itMessage = ref('');
+const itError = ref('');
+const isSubmittingIT = ref(false);
+
+const validateITForm = () => {
+  itFormErrors.value = {};
+  let isValid = true;
+  
+  // Requester name and department are auto-filled and read-only
+  if (!itForm.value.requesterName?.trim()) {
+    itFormErrors.value.requesterName = 'Please refresh the page if your name is missing';
+    isValid = false;
+  }
+  if (!itForm.value.department?.trim()) {
+    itFormErrors.value.department = 'Please refresh the page if your department is missing';
+    isValid = false;
+  }
+  if (!itForm.value.title?.trim()) {
+    itFormErrors.value.title = 'Request title is required';
+    isValid = false;
+  }
+  if (!itForm.value.description?.trim()) {
+    itFormErrors.value.description = 'Description is required';
+    isValid = false;
+  }
+  
+  return isValid;
+};
+
+const submitIT = async () => {
+  itMessage.value = '';
+  itError.value = '';
+  itFormErrors.value = {};
+  
+  if (!validateITForm()) {
+    return;
+  }
+  
+  isSubmittingIT.value = true;
+  try {
+    const res = await fetch(`${apiBase}/it-requests`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(itForm.value)
+    });
+    if (res.status === 401) {
+      clearAuth();
+      showToast('Your session has expired. Please log in again.', 'error', 8000);
+      return;
+    }
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to submit IT request');
+    showToast(`IT request created successfully! (ID: ${data.requestId})`, 'success');
+    itForm.value.title = '';
+    itForm.value.description = '';
+    itForm.value.systemName = '';
+    itForm.value.assetTag = '';
+    await loadRequests();
+  } catch (e) {
+    showToast(e.message, 'error', 8000);
+  } finally {
+    isSubmittingIT.value = false;
+  }
+};
+
+// ---- Onboarding ----
+const onboardingForm = ref({
+  requesterName: '',
+  department: '',
+  employeeName: '',
+  position: '',
+  location: '',
+  startDate: '',
+  deviceType: 'Business Laptop',
+  vpnRequired: false,
+  notes: ''
+});
+const onboardingFormErrors = ref({});
+const onboardingMessage = ref('');
+const onboardingError = ref('');
+const isSubmittingOnboarding = ref(false);
+
+const validateOnboardingForm = () => {
+  onboardingFormErrors.value = {};
+  let isValid = true;
+  
+  // Requester name and department are auto-filled and read-only
+  if (!onboardingForm.value.requesterName?.trim()) {
+    onboardingFormErrors.value.requesterName = 'Please refresh the page if your name is missing';
+    isValid = false;
+  }
+  if (!onboardingForm.value.department?.trim()) {
+    onboardingFormErrors.value.department = 'Please refresh the page if your department is missing';
+    isValid = false;
+  }
+  if (!onboardingForm.value.employeeName?.trim()) {
+    onboardingFormErrors.value.employeeName = 'New hire name is required';
+    isValid = false;
+  }
+  if (!onboardingForm.value.position?.trim()) {
+    onboardingFormErrors.value.position = 'Position is required';
+    isValid = false;
+  }
+  if (!onboardingForm.value.startDate) {
+    onboardingFormErrors.value.startDate = 'Start date is required';
+    isValid = false;
+  }
+  
+  return isValid;
+};
+
+const submitOnboarding = async () => {
+  onboardingMessage.value = '';
+  onboardingError.value = '';
+  onboardingFormErrors.value = {};
+  
+  if (!validateOnboardingForm()) {
+    return;
+  }
+  
+  isSubmittingOnboarding.value = true;
+  try {
+    const res = await fetch(`${apiBase}/onboarding`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(onboardingForm.value)
+    });
+    if (res.status === 401) {
+      clearAuth();
+      showToast('Your session has expired. Please log in again.', 'error', 8000);
+      return;
+    }
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to submit onboarding request');
+    showToast(`Onboarding request created for ${data.employeeName}! (ID: ${data.requestId})`, 'success');
+    onboardingForm.value.employeeName = '';
+    onboardingForm.value.position = '';
+    onboardingForm.value.startDate = '';
+    onboardingForm.value.notes = '';
+    await loadRequests();
+  } catch (e) {
+    showToast(e.message, 'error', 8000);
+  } finally {
+    isSubmittingOnboarding.value = false;
+  }
+};
+</script>
+
+<template>
+  <div class="app-container">
+    <div class="bg-shape shape-1"></div>
+    <div class="bg-shape shape-2"></div>
+
+    <!-- Login Screen -->
+    <div v-if="!isLoggedIn" class="login-container">
+      <div class="login-card">
+        <div class="brand-group login-brand">
+          <div class="brand-logo">
+            <svg viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <circle cx="20" cy="20" r="20" fill="var(--shc-deep-green)"/>
+              <path d="M20 40C8.9543 40 0 31.0457 0 20C0 8.9543 8.9543 0 20 0" fill="var(--shc-magenta)" style="mix-blend-mode: overlay; opacity: 0.6"/>
+              <circle cx="20" cy="20" r="12" stroke="var(--shc-gold)" stroke-width="1.5"/>
+            </svg>
+          </div>
+          <div class="brand-text">
+            <h1>Sultan Haitham City</h1>
+            <span class="brand-subtitle">Internal Services Portal</span>
+          </div>
+        </div>
+
+        <div class="login-form-section">
+          <h2>Employee Login</h2>
+          <p class="login-subtitle">Enter your credentials to access the portal</p>
+
+          <form @submit.prevent="handleLogin" class="login-form">
+            <div class="input-group">
+              <label>Email Address <span class="required">*</span></label>
+              <input 
+                v-model="loginForm.email" 
+                type="email" 
+                placeholder="your.email@housing.gov.om"
+                required
+                autocomplete="email"
+              />
+            </div>
+            <div class="input-group">
+              <label>Password <span class="required">*</span></label>
+              <input 
+                v-model="loginForm.password" 
+                type="password" 
+                placeholder="Enter your password"
+                required
+                autocomplete="current-password"
+              />
+            </div>
+
+            <div v-if="loginError" class="feedback error">{{ loginError }}</div>
+
+            <button type="submit" class="btn-primary login-btn" :disabled="isLoggingIn">
+              <span v-if="isLoggingIn" class="spinner-small"></span>
+              <span>{{ isLoggingIn ? 'Logging in...' : 'Sign In' }}</span>
+            </button>
+          </form>
+
+          <div class="login-hint">
+            <p><strong>Demo credentials (password: password123):</strong></p>
+            <ul style="text-align: left; margin-top: 8px; padding-left: 20px; font-size: 0.9em;">
+              <li>admin@housing.gov.om (Super Admin)</li>
+              <li>it@housing.gov.om (IT Admin)</li>
+              <li>ismail@housing.gov.om (Employee)</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Portal (shown when logged in) -->
+    <div v-else>
+      <header class="app-header">
+        <div class="brand-group">
+          <div class="brand-logo">
+            <svg viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <circle cx="20" cy="20" r="20" fill="var(--shc-deep-green)"/>
+              <path d="M20 40C8.9543 40 0 31.0457 0 20C0 8.9543 8.9543 0 20 0" fill="var(--shc-magenta)" style="mix-blend-mode: overlay; opacity: 0.6"/>
+              <circle cx="20" cy="20" r="12" stroke="var(--shc-gold)" stroke-width="1.5"/>
+            </svg>
+          </div>
+          <div class="brand-text">
+            <h1>Sultan Haitham City</h1>
+            <span class="brand-subtitle">Internal Services Portal</span>
+          </div>
+        </div>
+
+        <div class="header-right">
+          <div class="user-info">
+            <span class="user-name">{{ currentUser?.fullName }}</span>
+            <span class="user-dept">{{ currentUser?.department }}</span>
+          </div>
+          <button class="btn-secondary logout-btn" @click="handleLogout">
+            Logout
+          </button>
+        </div>
+      </header>
+
+      <nav class="nav-pills">
+        <button 
+          v-for="tab in availableTabs" 
+          :key="tab"
+          :class="{ active: currentTab === tab }" 
+          @click="currentTab = tab"
+        >
+          {{ getTabLabel(tab) }}
+        </button>
+      </nav>
+
+    <main class="main-content">
+      <transition name="fade" mode="out-in">
+        
+        <div v-if="currentTab === 'car'" class="glass-card">
+          <div class="card-header">
+            <h2>Vehicle Requisition</h2>
+            <p class="subtitle">Book a fleet vehicle for official city business.</p>
+          </div>
+
+          <div class="form-grid">
+            <div class="input-group">
+              <label>Full Name <span class="required">*</span></label>
+              <input 
+                v-model="carForm.requesterName" 
+                type="text" 
+                placeholder="e.g. Ismail Al Abdali"
+                :class="{ 'error': carFormErrors.requesterName }"
+                readonly
+                style="background-color: #f5f5f5; cursor: not-allowed;"
+              />
+              <span v-if="carFormErrors.requesterName" class="error-message">{{ carFormErrors.requesterName }}</span>
+            </div>
+            <div class="input-group">
+              <label>Department <span class="required">*</span></label>
+              <input 
+                v-model="carForm.department" 
+                type="text"
+                :class="{ 'error': carFormErrors.department }"
+                readonly
+                style="background-color: #f5f5f5; cursor: not-allowed;"
+              />
+              <span v-if="carFormErrors.department" class="error-message">{{ carFormErrors.department }}</span>
+            </div>
+            <div class="input-group">
+              <label>Start Date & Time <span class="required">*</span></label>
+              <input 
+                v-model="carForm.startDatetime" 
+                type="datetime-local"
+                :class="{ 'error': carFormErrors.startDatetime }"
+              />
+              <span v-if="carFormErrors.startDatetime" class="error-message">{{ carFormErrors.startDatetime }}</span>
+            </div>
+            <div class="input-group">
+              <label>End Date & Time <span class="required">*</span></label>
+              <input 
+                v-model="carForm.endDatetime" 
+                type="datetime-local"
+                :class="{ 'error': carFormErrors.endDatetime }"
+              />
+              <span v-if="carFormErrors.endDatetime" class="error-message">{{ carFormErrors.endDatetime }}</span>
+            </div>
+            <div class="input-group">
+              <label>Destination <span class="required">*</span></label>
+              <input 
+                v-model="carForm.destination" 
+                type="text"
+                :class="{ 'error': carFormErrors.destination }"
+              />
+              <span v-if="carFormErrors.destination" class="error-message">{{ carFormErrors.destination }}</span>
+            </div>
+            <div class="input-group full-width">
+              <label>Purpose of Trip <span class="required">*</span></label>
+              <textarea 
+                v-model="carForm.reason" 
+                rows="2" 
+                placeholder="Briefly describe the business need..."
+                :class="{ 'error': carFormErrors.reason }"
+              ></textarea>
+              <span v-if="carFormErrors.reason" class="error-message">{{ carFormErrors.reason }}</span>
+            </div>
+            <div class="input-group">
+              <label>Passengers</label>
+              <input v-model.number="carForm.passengers" type="number" min="1" />
+            </div>
+            <div class="input-group">
+              <label>Vehicle Selection</label>
+              <div class="select-wrapper">
+                <select v-model="carForm.vehicleId" :disabled="isLoadingVehicles">
+                  <option value="">Auto-assign (First Available)</option>
+                  <option 
+                    v-for="vehicle in vehicles" 
+                    :key="vehicle.id" 
+                    :value="vehicle.id"
+                  >
+                    {{ vehicle.name }} ({{ vehicle.plate_number }})
+                  </option>
+                </select>
+              </div>
+              <span v-if="isLoadingVehicles" class="text-muted" style="font-size: 0.85rem;">Loading vehicles...</span>
+            </div>
+          </div>
+
+          <div class="actions">
+            <button class="btn-primary" @click="submitCarBooking" :disabled="isSubmittingCar">
+              <span v-if="isSubmittingCar" class="spinner-small"></span>
+              <span>{{ isSubmittingCar ? 'Booking...' : 'Confirm Booking' }}</span>
+            </button>
+          </div>
+          
+          <transition name="fade">
+            <div v-if="carMessage || carError" class="feedback-container">
+              <div v-if="carMessage" class="feedback success">{{ carMessage }}</div>
+              <div v-if="carError" class="feedback error">{{ carError }}</div>
+            </div>
+          </transition>
+        </div>
+
+        <div v-else-if="currentTab === 'it'" class="glass-card">
+          <div class="card-header">
+            <h2>IT Support & Assets</h2>
+            <p class="subtitle">Report technical issues or request hardware/software.</p>
+          </div>
+
+          <div class="form-grid">
+            <div class="input-group">
+              <label>Requester Name <span class="required">*</span></label>
+              <input 
+                v-model="itForm.requesterName" 
+                type="text"
+                :class="{ 'error': itFormErrors.requesterName }"
+                readonly
+                style="background-color: #f5f5f5; cursor: not-allowed;"
+              />
+              <span v-if="itFormErrors.requesterName" class="error-message">{{ itFormErrors.requesterName }}</span>
+            </div>
+            <div class="input-group">
+              <label>Department <span class="required">*</span></label>
+              <input 
+                v-model="itForm.department" 
+                type="text"
+                :class="{ 'error': itFormErrors.department }"
+                readonly
+                style="background-color: #f5f5f5; cursor: not-allowed;"
+              />
+              <span v-if="itFormErrors.department" class="error-message">{{ itFormErrors.department }}</span>
+            </div>
+            <div class="input-group full-width">
+              <label>Request Title <span class="required">*</span></label>
+              <input 
+                v-model="itForm.title" 
+                type="text" 
+                class="highlight-input" 
+                placeholder="What do you need help with?"
+                :class="{ 'error': itFormErrors.title }"
+              />
+              <span v-if="itFormErrors.title" class="error-message">{{ itFormErrors.title }}</span>
+            </div>
+            <div class="input-group full-width">
+              <label>Detailed Description <span class="required">*</span></label>
+              <textarea 
+                v-model="itForm.description" 
+                rows="3"
+                :class="{ 'error': itFormErrors.description }"
+              ></textarea>
+              <span v-if="itFormErrors.description" class="error-message">{{ itFormErrors.description }}</span>
+            </div>
+            <div class="input-group">
+              <label>Category</label>
+              <div class="select-wrapper">
+                <select v-model="itForm.category">
+                  <option>Support / Incident</option>
+                  <option>Devices & Materials</option>
+                  <option>Access & Permissions</option>
+                  <option>Software / License</option>
+                </select>
+              </div>
+            </div>
+            <div class="input-group">
+              <label>Urgency Level</label>
+              <div class="select-wrapper">
+                <select v-model="itForm.urgency" :class="`urgency-${itForm.urgency.toLowerCase()}`">
+                  <option>Normal</option>
+                  <option>Urgent</option>
+                  <option>Critical</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <div class="actions">
+            <button class="btn-primary" @click="submitIT" :disabled="isSubmittingIT">
+              <span v-if="isSubmittingIT" class="spinner-small"></span>
+              <span>{{ isSubmittingIT ? 'Submitting...' : 'Submit Ticket' }}</span>
+            </button>
+          </div>
+          <transition name="fade">
+            <div v-if="itMessage || itError" class="feedback-container">
+              <div v-if="itMessage" class="feedback success">{{ itMessage }}</div>
+              <div v-if="itError" class="feedback error">{{ itError }}</div>
+            </div>
+          </transition>
+        </div>
+
+        <div v-else-if="currentTab === 'onboarding'" class="glass-card">
+          <div class="card-header">
+            <h2>Employee Onboarding</h2>
+            <p class="subtitle">
+              <span v-if="!isLead && !isHRAdmin && !isSuperAdmin">
+                Only Leads/Heads can submit onboarding requests.
+              </span>
+              <span v-else>
+                Prepare assets and accounts for new talent. 
+                <strong style="color: var(--shc-deep-green);">IT requests for devices will be auto-created when onboarding is completed.</strong>
+              </span>
+            </p>
+          </div>
+          
+          <div v-if="isLead || isHRAdmin || isSuperAdmin" class="info-banner" style="background: #e8f4f0; border-left: 4px solid var(--shc-deep-green); padding: 1rem; border-radius: 8px; margin-bottom: 1.5rem;">
+            <p style="margin: 0; font-size: 0.9rem; color: var(--shc-deep-green);">
+              <strong>💡 Automatic IT Request:</strong> When you complete an onboarding request with a device selected, 
+              an IT request will be automatically created for device setup and configuration.
+            </p>
+          </div>
+          
+          <div v-if="!isLead && !isHRAdmin && !isSuperAdmin" class="empty-state">
+            <p>You need to be a Lead/Head or HR Admin to submit onboarding requests.</p>
+            <p class="text-muted" style="margin-top: 0.5rem; font-size: 0.9rem;">
+              Contact your administrator to update your permissions.
+            </p>
+          </div>
+          
+          <div v-else class="form-grid">
+            <div class="input-group">
+              <label>Hiring Manager <span class="required">*</span></label>
+              <input 
+                v-model="onboardingForm.requesterName" 
+                type="text"
+                :class="{ 'error': onboardingFormErrors.requesterName }"
+                readonly
+                style="background-color: #f5f5f5; cursor: not-allowed;"
+              />
+              <span v-if="onboardingFormErrors.requesterName" class="error-message">{{ onboardingFormErrors.requesterName }}</span>
+            </div>
+            <div class="input-group">
+              <label>Department <span class="required">*</span></label>
+              <input 
+                v-model="onboardingForm.department" 
+                type="text"
+                :class="{ 'error': onboardingFormErrors.department }"
+                readonly
+                style="background-color: #f5f5f5; cursor: not-allowed;"
+              />
+              <span v-if="onboardingFormErrors.department" class="error-message">{{ onboardingFormErrors.department }}</span>
+            </div>
+            <div class="input-group">
+              <label>New Hire Name <span class="required">*</span></label>
+              <input 
+                v-model="onboardingForm.employeeName" 
+                type="text"
+                :class="{ 'error': onboardingFormErrors.employeeName }"
+              />
+              <span v-if="onboardingFormErrors.employeeName" class="error-message">{{ onboardingFormErrors.employeeName }}</span>
+            </div>
+            <div class="input-group">
+              <label>Position / Title <span class="required">*</span></label>
+              <input 
+                v-model="onboardingForm.position" 
+                type="text"
+                :class="{ 'error': onboardingFormErrors.position }"
+              />
+              <span v-if="onboardingFormErrors.position" class="error-message">{{ onboardingFormErrors.position }}</span>
+            </div>
+            <div class="input-group">
+              <label>Start Date <span class="required">*</span></label>
+              <input 
+                v-model="onboardingForm.startDate" 
+                type="date"
+                :class="{ 'error': onboardingFormErrors.startDate }"
+              />
+              <span v-if="onboardingFormErrors.startDate" class="error-message">{{ onboardingFormErrors.startDate }}</span>
+            </div>
+            <div class="input-group">
+              <label>Location</label>
+              <input v-model="onboardingForm.location" type="text" placeholder="e.g. Main Office" />
+            </div>
+            <div class="input-group">
+              <label>
+                Primary Device 
+                <span class="info-badge" style="font-size: 0.7rem; font-weight: normal; color: var(--shc-text-secondary); text-transform: none; letter-spacing: 0; margin-left: 0.5rem;">(Auto-creates IT request)</span>
+              </label>
+              <div class="select-wrapper">
+                <select v-model="onboardingForm.deviceType">
+                  <option value="">No device needed</option>
+                  <option>Business Laptop</option>
+                  <option>Engineer Laptop</option>
+                  <option>MacBook Pro</option>
+                  <option>Desktop Computer</option>
+                  <option>Tablet</option>
+                </select>
+              </div>
+              <span v-if="onboardingForm.deviceType" class="text-muted" style="font-size: 0.85rem; margin-top: 0.5rem; display: block; line-height: 1.5; color: var(--shc-deep-green);">
+                ✓ IT request will be auto-created when onboarding is completed
+              </span>
+            </div>
+            <div class="input-group checkbox-group">
+              <label class="checkbox-container">
+                <input v-model="onboardingForm.vpnRequired" type="checkbox" />
+                <span class="checkmark"></span>
+                VPN Access Required
+              </label>
+            </div>
+            <div class="input-group full-width">
+              <label>Additional Notes</label>
+              <textarea v-model="onboardingForm.notes" rows="2" placeholder="Any additional information..."></textarea>
+            </div>
+          </div>
+
+          <div class="actions">
+            <button class="btn-primary" @click="submitOnboarding" :disabled="isSubmittingOnboarding">
+              <span v-if="isSubmittingOnboarding" class="spinner-small"></span>
+              <span>{{ isSubmittingOnboarding ? 'Creating...' : 'Initialize Onboarding' }}</span>
+            </button>
+          </div>
+          <transition name="fade">
+            <div v-if="onboardingMessage || onboardingError" class="feedback-container">
+              <div v-if="onboardingMessage" class="feedback success">{{ onboardingMessage }}</div>
+              <div v-if="onboardingError" class="feedback error">{{ onboardingError }}</div>
+            </div>
+          </transition>
+        </div>
+
+        <div v-else-if="currentTab === 'admin'" class="glass-card">
+          <div class="card-header">
+            <h2>Admin Panel</h2>
+            <p class="subtitle">
+              <span v-if="isSuperAdmin">Full system administration</span>
+              <span v-else-if="isHRAdmin">HR Management</span>
+              <span v-else-if="isFleetAdmin">Fleet Management</span>
+              <span v-else-if="isITAdmin">IT Management</span>
+            </p>
+          </div>
+
+          <!-- Section 1: Employees (SUPER_ADMIN, HR_ADMIN only) -->
+          <div v-if="canManageEmployees" class="admin-section">
+            <div class="section-header">
+              <h3>Employees</h3>
+              <button class="btn-secondary" @click="loadEmployees" :disabled="isLoadingEmployees">
+                <span v-if="isLoadingEmployees" class="spinner-small"></span>
+                {{ isLoadingEmployees ? 'Loading...' : 'Refresh' }}
+              </button>
+            </div>
+            <div class="table-container">
+              <table v-if="employees.length" class="styled-table">
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Email</th>
+                    <th>Department</th>
+                    <th>Role</th>
+                    <th>Lead</th>
+                    <th>Active</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="emp in employees" :key="emp.id">
+                    <td class="fw-bold">{{ emp.fullName }}</td>
+                    <td>{{ emp.email }}</td>
+                    <td>
+                      <template v-if="editingEmployee === emp.id">
+                        <input 
+                          v-model="employeeEditForm.department" 
+                          type="text" 
+                          class="edit-input"
+                          placeholder="Department"
+                        />
+                      </template>
+                      <template v-else>
+                        {{ emp.department || 'N/A' }}
+                      </template>
+                    </td>
+                    <td>
+                      <template v-if="editingEmployee === emp.id">
+                        <select v-model="employeeEditForm.role" class="edit-select">
+                          <option value="EMPLOYEE">Employee</option>
+                          <option value="SUPER_ADMIN">Super Admin</option>
+                          <option value="IT_ADMIN">IT Admin</option>
+                          <option value="HR_ADMIN">HR Admin</option>
+                          <option value="FLEET_ADMIN">Fleet Admin</option>
+                        </select>
+                      </template>
+                      <template v-else>
+                        <span class="type-pill">{{ emp.role }}</span>
+                      </template>
+                    </td>
+                    <td>
+                      <template v-if="editingEmployee === emp.id">
+                        <label class="checkbox-container">
+                          <input v-model="employeeEditForm.isLead" type="checkbox" />
+                          <span class="checkmark"></span>
+                          <span style="margin-left: 0.5rem; font-size: 0.9rem;">Lead</span>
+                        </label>
+                      </template>
+                      <template v-else>
+                        <span class="status-indicator" :data-status="emp.isLead ? 'Yes' : 'No'">
+                          {{ emp.isLead ? 'Yes' : 'No' }}
+                        </span>
+                      </template>
+                    </td>
+                    <td>
+                      <template v-if="editingEmployee === emp.id">
+                        <label class="checkbox-container" style="display: flex; align-items: center; gap: 0.5rem;">
+                          <input v-model="employeeEditForm.isLead" type="checkbox" />
+                          <span class="checkmark"></span>
+                          <span style="font-size: 0.9rem;">Lead</span>
+                        </label>
+                      </template>
+                      <template v-else>
+                        <span class="status-indicator" :data-status="emp.isLead ? 'Yes' : 'No'">
+                          {{ emp.isLead ? 'Yes' : 'No' }}
+                        </span>
+                      </template>
+                    </td>
+                    <td>
+                      <span class="status-indicator" :data-status="emp.isActive ? 'Active' : 'Inactive'">
+                        {{ emp.isActive ? 'Active' : 'Inactive' }}
+                      </span>
+                    </td>
+                    <td>
+                      <div class="action-buttons">
+                        <template v-if="editingEmployee === emp.id">
+                          <button class="btn-link text-success" @click="saveEmployee(emp.id)">Save</button>
+                          <button class="btn-link text-muted" @click="cancelEditEmployee">Cancel</button>
+                        </template>
+                        <template v-else>
+                          <button class="btn-link" @click="startEditEmployee(emp)">Edit</button>
+                          <button 
+                            v-if="!emp.isActive" 
+                            class="btn-link text-success" 
+                            @click="activateEmployee(emp.id)"
+                          >
+                            Activate
+                          </button>
+                        </template>
+                      </div>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+              <div v-else class="empty-state">
+                <p>No employees found.</p>
+              </div>
+            </div>
+          </div>
+          
+          <!-- Create New Employee (SUPER_ADMIN only) -->
+          <div v-if="canManageEmployees && isSuperAdmin" class="admin-section">
+            <div class="section-header">
+              <h3>Create New Employee</h3>
+            </div>
+            <div class="form-grid" style="max-width: 800px;">
+              <div class="input-group">
+                <label>Email <span class="required">*</span></label>
+                <input v-model="newEmployeeForm.email" type="email" placeholder="email@housing.gov.om" />
+              </div>
+              <div class="input-group">
+                <label>Password <span class="required">*</span></label>
+                <input v-model="newEmployeeForm.password" type="password" placeholder="Set initial password" />
+              </div>
+              <div class="input-group">
+                <label>Full Name <span class="required">*</span></label>
+                <input v-model="newEmployeeForm.fullName" type="text" placeholder="Full Name" />
+              </div>
+              <div class="input-group">
+                <label>Department</label>
+                <input v-model="newEmployeeForm.department" type="text" placeholder="Department" />
+              </div>
+              <div class="input-group">
+                <label>Role <span class="required">*</span></label>
+                <div class="select-wrapper">
+                  <select v-model="newEmployeeForm.role">
+                    <option value="EMPLOYEE">Employee</option>
+                    <option value="SUPER_ADMIN">Super Admin</option>
+                    <option value="IT_ADMIN">IT Admin</option>
+                    <option value="HR_ADMIN">HR Admin</option>
+                    <option value="FLEET_ADMIN">Fleet Admin</option>
+                  </select>
+                </div>
+              </div>
+              <div class="input-group checkbox-group">
+                <label class="checkbox-container">
+                  <input v-model="newEmployeeForm.isLead" type="checkbox" />
+                  <span class="checkmark"></span>
+                  Is Lead/Head
+                </label>
+              </div>
+              <div class="input-group full-width">
+                <button class="btn-primary" @click="createEmployee" :disabled="isCreatingEmployee">
+                  <span v-if="isCreatingEmployee" class="spinner-small"></span>
+                  {{ isCreatingEmployee ? 'Creating...' : 'Create Employee' }}
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Section 2: Fleet Schedule (SUPER_ADMIN, FLEET_ADMIN only) -->
+          <div v-if="canManageVehicles" class="admin-section">
+            <div class="section-header">
+              <h3>Fleet Schedule</h3>
+              <div style="display: flex; gap: 1rem; align-items: center;">
+                <input 
+                  v-model="scheduleDateFrom" 
+                  type="date" 
+                  class="edit-input"
+                  style="width: auto;"
+                  @change="loadFleetSchedule"
+                />
+                <span>to</span>
+                <input 
+                  v-model="scheduleDateTo" 
+                  type="date" 
+                  class="edit-input"
+                  style="width: auto;"
+                  @change="loadFleetSchedule"
+                />
+                <button class="btn-secondary" @click="loadFleetSchedule" :disabled="isLoadingSchedule">
+                  <span v-if="isLoadingSchedule" class="spinner-small"></span>
+                  {{ isLoadingSchedule ? 'Loading...' : 'Refresh' }}
+                </button>
+              </div>
+            </div>
+            <div class="table-container">
+              <table v-if="fleetSchedule.length" class="styled-table">
+                <thead>
+                  <tr>
+                    <th>Vehicle</th>
+                    <th>Start</th>
+                    <th>End</th>
+                    <th>Requester</th>
+                    <th>Destination</th>
+                    <th>Status</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="booking in fleetSchedule" :key="booking.requestId">
+                    <td class="fw-bold">
+                      <span v-if="booking.vehicleName">{{ booking.vehicleName }}</span>
+                      <span v-else class="text-muted">Unassigned</span>
+                      <br>
+                      <span class="font-mono" style="font-size: 0.85rem; color: var(--shc-text-secondary);">
+                        {{ booking.vehiclePlate || 'N/A' }}
+                      </span>
+                    </td>
+                    <td>{{ new Date(booking.startDatetime).toLocaleString() }}</td>
+                    <td>{{ new Date(booking.endDatetime).toLocaleString() }}</td>
+                    <td>{{ booking.requesterName }}</td>
+                    <td>{{ booking.destination || 'N/A' }}</td>
+                    <td>
+                      <span class="status-indicator" :data-status="booking.status">
+                        {{ booking.status }}
+                      </span>
+                    </td>
+                    <td>
+                      <button class="btn-link" @click="loadRequestDetails(booking.requestId)">View</button>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+              <div v-else class="empty-state">
+                <p>{{ isLoadingSchedule ? 'Loading schedule...' : 'No bookings found for selected date range.' }}</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Section 3: Vehicles (SUPER_ADMIN, FLEET_ADMIN only) -->
+          <div v-if="canManageVehicles" class="admin-section">
+            <div class="section-header">
+              <h3>Vehicles</h3>
+              <button class="btn-secondary" @click="loadAdminVehicles" :disabled="isLoadingVehicles">
+                <span v-if="isLoadingVehicles" class="spinner-small"></span>
+                {{ isLoadingVehicles ? 'Loading...' : 'Refresh' }}
+              </button>
+            </div>
+            <div class="table-container">
+              <table v-if="vehicles.length" class="styled-table">
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Plate</th>
+                    <th>Type</th>
+                    <th>Status</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="vehicle in vehicles" :key="vehicle.id">
+                    <td class="fw-bold">{{ vehicle.name }}</td>
+                    <td class="font-mono">{{ vehicle.plate_number }}</td>
+                    <td>{{ vehicle.type || 'N/A' }}</td>
+                    <td>
+                      <span class="status-indicator" :data-status="vehicle.status">
+                        {{ vehicle.status }}
+                      </span>
+                    </td>
+                    <td>
+                      <button 
+                        class="btn-link" 
+                        @click="toggleVehicleStatus(vehicle.id, vehicle.status)"
+                      >
+                        {{ vehicle.status === 'ACTIVE' ? 'Deactivate' : 'Activate' }}
+                      </button>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+              <div v-else class="empty-state">
+                <p>No vehicles found.</p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div v-else class="glass-card">
+          <div class="card-header flex-between">
+            <div>
+              <h2>{{ isAdminUser ? 'All Requests' : 'My Requests' }}</h2>
+              <p class="subtitle">
+                <span v-if="isSuperAdmin">View and manage all system requests</span>
+                <span v-else-if="isITAdmin">View and manage IT requests</span>
+                <span v-else-if="isHRAdmin">View and manage onboarding requests</span>
+                <span v-else-if="isFleetAdmin">View and manage car booking requests</span>
+                <span v-else>Track the status of your submissions</span>
+              </p>
+            </div>
+            <button class="btn-secondary" @click="loadRequests" :disabled="isLoadingRequests">
+              <span v-if="isLoadingRequests" class="spinner-small"></span>
+              {{ isLoadingRequests ? 'Syncing...' : 'Refresh List' }}
+            </button>
+          </div>
+
+          <!-- Filters and Search -->
+          <div class="filters-section">
+            <div class="search-box">
+              <input 
+                v-model="searchQuery" 
+                type="text" 
+                placeholder="Search by ID, title, requester..."
+                class="search-input"
+              />
+            </div>
+            <div class="filter-group">
+              <div class="select-wrapper filter-select">
+                <select v-model="statusFilter">
+                  <option value="all">All Statuses</option>
+                  <option value="PENDING">Pending</option>
+                  <option value="BOOKED">Booked</option>
+                  <option value="IN_PROGRESS">In Progress</option>
+                  <option value="APPROVED">Approved</option>
+                  <option value="COMPLETED">Completed</option>
+                  <option value="REJECTED">Rejected</option>
+                </select>
+              </div>
+              <div class="select-wrapper filter-select">
+                <select v-model="typeFilter">
+                  <option value="all">All Types</option>
+                  <option value="CAR_BOOKING">Car Booking</option>
+                  <option value="IT">IT Request</option>
+                  <option value="ONBOARDING">Onboarding</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <div class="table-container">
+            <table v-if="filteredRequests.length" class="styled-table">
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th v-if="canViewEmployeeId">Employee ID</th>
+                  <th>Type</th>
+                  <th>Title</th>
+                  <th>Requester</th>
+                  <th>Status</th>
+                  <th>Date</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="r in filteredRequests" :key="r.id" class="table-row-clickable" @click="loadRequestDetails(r.id)">
+                  <td class="font-mono">#{{ r.id }}</td>
+                  <td v-if="canViewEmployeeId" class="font-mono employee-id">{{ r.employeeId || 'N/A' }}</td>
+                  <td>
+                    <span class="type-pill" :class="r.type.toLowerCase().replace(' ','-')">{{ r.type }}</span>
+                  </td>
+                  <td class="fw-bold">{{ r.title }}</td>
+                  <td>{{ r.requesterName }}</td>
+                  <td>
+                    <span class="status-indicator" :data-status="r.status">{{ r.status }}</span>
+                  </td>
+                  <td class="text-muted">{{ new Date(r.createdAt).toLocaleDateString() }}</td>
+                  <td>
+                    <button class="btn-link" @click.stop="loadRequestDetails(r.id)">View</button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+            <div v-else class="empty-state">
+              <svg class="empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+              </svg>
+              <p>{{ searchQuery || statusFilter !== 'all' || typeFilter !== 'all' ? 'No requests match your filters.' : 'No active requests found.' }}</p>
+              <button v-if="searchQuery || statusFilter !== 'all' || typeFilter !== 'all'" class="btn-secondary mt-2" @click="searchQuery = ''; statusFilter = 'all'; typeFilter = 'all'">Clear Filters</button>
+            </div>
+          </div>
+        </div>
+
+      </transition>
+    </main>
+
+    <!-- Toast Notifications -->
+    <div class="toast-container">
+      <transition-group name="toast" tag="div">
+        <div
+          v-for="toast in toasts"
+          :key="toast.id"
+          :class="['toast', `toast-${toast.type}`]"
+          @click="removeToast(toast.id)"
+        >
+          <span class="toast-message">{{ toast.message }}</span>
+          <button class="toast-close" @click.stop="removeToast(toast.id)">×</button>
+        </div>
+      </transition-group>
+    </div>
+
+    <!-- Request Detail Modal -->
+    <transition name="modal">
+      <div v-if="showRequestModal && selectedRequest" class="modal-overlay" @click="showRequestModal = false">
+        <div class="modal-content" @click.stop>
+          <div class="modal-header">
+            <h3>Request Details #{{ selectedRequest.id }}</h3>
+            <div class="modal-header-actions">
+              <div v-if="canManageAllRequests" class="status-update-group">
+                <select 
+                  :value="selectedRequest.status" 
+                  @change="updateRequestStatus(selectedRequest.id, $event.target.value)"
+                  :disabled="updatingStatus"
+                  class="status-select"
+                >
+                  <option value="PENDING">Pending</option>
+                  <option value="APPROVED">Approved</option>
+                  <option value="IN_PROGRESS">In Progress</option>
+                  <option value="COMPLETED">Completed</option>
+                  <option value="REJECTED">Rejected</option>
+                  <option value="BOOKED">Booked</option>
+                </select>
+                <span v-if="updatingStatus" class="spinner-small"></span>
+              </div>
+              <button class="modal-close" @click="showRequestModal = false">×</button>
+            </div>
+          </div>
+          <div class="modal-body">
+            <div class="detail-section">
+              <div class="detail-row">
+                <span class="detail-label">Type:</span>
+                <span class="type-pill" :class="selectedRequest.type?.toLowerCase().replace(' ','-')">{{ selectedRequest.type }}</span>
+              </div>
+              <div class="detail-row">
+                <span class="detail-label">Status:</span>
+                <span class="status-indicator" :data-status="selectedRequest.status">{{ selectedRequest.status }}</span>
+              </div>
+              <div class="detail-row">
+                <span class="detail-label">Title:</span>
+                <span>{{ selectedRequest.title }}</span>
+              </div>
+              <div v-if="canViewEmployeeId" class="detail-row">
+                <span class="detail-label">Employee ID:</span>
+                <span class="font-mono employee-id">{{ selectedRequest.employeeId || 'N/A' }}</span>
+              </div>
+              <div class="detail-row">
+                <span class="detail-label">Requester:</span>
+                <span>{{ selectedRequest.requesterName }}</span>
+              </div>
+              <div class="detail-row">
+                <span class="detail-label">Department:</span>
+                <span>{{ selectedRequest.department || 'N/A' }}</span>
+              </div>
+              <div class="detail-row">
+                <span class="detail-label">Created:</span>
+                <span>{{ new Date(selectedRequest.createdAt).toLocaleString() }}</span>
+              </div>
+              <div v-if="selectedRequest.description" class="detail-row full-width">
+                <span class="detail-label">Description:</span>
+                <p class="detail-description">{{ selectedRequest.description }}</p>
+              </div>
+              
+              <!-- Car Booking Details -->
+              <template v-if="selectedRequest.type === 'CAR_BOOKING' && selectedRequest.carBooking">
+                <div class="detail-section-title">Booking Information</div>
+                <div class="detail-row">
+                  <span class="detail-label">Vehicle:</span>
+                  <span>{{ selectedRequest.carBooking.vehicle?.name || 'N/A' }}</span>
+                </div>
+                <div class="detail-row">
+                  <span class="detail-label">Start:</span>
+                  <span>{{ new Date(selectedRequest.carBooking.startDatetime).toLocaleString() }}</span>
+                </div>
+                <div class="detail-row">
+                  <span class="detail-label">End:</span>
+                  <span>{{ new Date(selectedRequest.carBooking.endDatetime).toLocaleString() }}</span>
+                </div>
+                <div class="detail-row">
+                  <span class="detail-label">Destination:</span>
+                  <span>{{ selectedRequest.carBooking.destination || 'N/A' }}</span>
+                </div>
+                <div class="detail-row">
+                  <span class="detail-label">Passengers:</span>
+                  <span>{{ selectedRequest.carBooking.passengers || 'N/A' }}</span>
+                </div>
+              </template>
+
+              <!-- IT Request Details -->
+              <template v-if="selectedRequest.type === 'IT' && selectedRequest.itRequest">
+                <div class="detail-section-title">IT Details</div>
+                <div class="detail-row">
+                  <span class="detail-label">Category:</span>
+                  <span>{{ selectedRequest.itRequest.category }}</span>
+                </div>
+                <div class="detail-row">
+                  <span class="detail-label">Urgency:</span>
+                  <span class="status-indicator urgency-badge" :data-urgency="selectedRequest.itRequest.urgency">{{ selectedRequest.itRequest.urgency }}</span>
+                </div>
+                <div class="detail-row">
+                  <span class="detail-label">System:</span>
+                  <span>{{ selectedRequest.itRequest.systemName || 'N/A' }}</span>
+                </div>
+                <div class="detail-row">
+                  <span class="detail-label">Asset Tag:</span>
+                  <span>{{ selectedRequest.itRequest.assetTag || 'N/A' }}</span>
+                </div>
+              </template>
+
+              <!-- Onboarding Details -->
+              <template v-if="selectedRequest.type === 'ONBOARDING' && selectedRequest.onboarding">
+                <div class="detail-section-title">Onboarding Information</div>
+                <div class="detail-row">
+                  <span class="detail-label">Employee:</span>
+                  <span>{{ selectedRequest.onboarding.employeeName }}</span>
+                </div>
+                <div class="detail-row">
+                  <span class="detail-label">Position:</span>
+                  <span>{{ selectedRequest.onboarding.position }}</span>
+                </div>
+                <div class="detail-row">
+                  <span class="detail-label">Start Date:</span>
+                  <span>{{ new Date(selectedRequest.onboarding.startDate).toLocaleDateString() }}</span>
+                </div>
+                <div class="detail-row">
+                  <span class="detail-label">Device:</span>
+                  <span>{{ selectedRequest.onboarding.deviceType }}</span>
+                </div>
+                <div class="detail-row">
+                  <span class="detail-label">VPN Required:</span>
+                  <span>{{ selectedRequest.onboarding.vpnRequired ? 'Yes' : 'No' }}</span>
+                </div>
+                <div v-if="selectedRequest.onboarding.notes" class="detail-row full-width">
+                  <span class="detail-label">Notes:</span>
+                  <p class="detail-description">{{ selectedRequest.onboarding.notes }}</p>
+                </div>
+              </template>
+            </div>
+          </div>
+        </div>
+      </div>
+    </transition>
+    </div>
+  </div>
+</template>
+
+<style>
+/* Sultan Haitham City Branding Theme 
+  Based on Concept Presentation 
+*/
+@import url('https://fonts.googleapis.com/css2?family=Cairo:wght@300;400;600;700&family=Playfair+Display:ital,wght@0,400;0,600;1,400&display=swap');
+
+:root {
+  /* Primary Identity  */
+  --shc-deep-green: #37481f; 
+  --shc-magenta: #5c1030;    /* Viva Magenta */
+  --shc-gold: #dbb557;       /* Bright Yellow/Gold */
+  --shc-emerald: #21423f;
+  
+  /* Functional Colors */
+  --shc-bg-sand: #fcfbf9;    /* Clean paper look */
+  --shc-bg-warm: #f3f0e9;    /* Warm beige for backgrounds */
+  --shc-text-primary: #1a2212;
+  --shc-text-secondary: #5e6658;
+  --shc-border: #e0dcd0;
+  
+  /* UI Elements */
+  --radius-lg: 24px;
+  --radius-sm: 12px;
+  --shadow-soft: 0 20px 40px -10px rgba(55, 72, 31, 0.08);
+  --shadow-hover: 0 25px 50px -5px rgba(55, 72, 31, 0.12);
+  
+  /* Fonts */
+  --font-heading: "Playfair Display", serif; /* Mimics Loren Pro [cite: 124] */
+  --font-body: "Cairo", sans-serif; /* Matches Avenir Arabic/Clean sans  */
+}
+
+body {
+  margin: 0;
+  background-color: var(--shc-bg-warm);
+  color: var(--shc-text-primary);
+  font-family: var(--font-body);
+  -webkit-font-smoothing: antialiased;
+  background-image: radial-gradient(circle at 0% 0%, #fff 0%, transparent 50%), 
+                    radial-gradient(circle at 100% 100%, #e8e2d2 0%, transparent 50%);
+  background-attachment: fixed;
+  min-height: 100vh;
+}
+
+.app-container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 2rem;
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+/* Abstract Background Shapes for "Nature" feel */
+.bg-shape {
+  position: fixed;
+  border-radius: 50%;
+  filter: blur(80px);
+  z-index: -1;
+  opacity: 0.4;
+}
+.shape-1 {
+  width: 400px;
+  height: 400px;
+  background: var(--shc-gold);
+  top: -100px;
+  right: -50px;
+  opacity: 0.15;
+}
+.shape-2 {
+  width: 300px;
+  height: 300px;
+  background: var(--shc-emerald);
+  bottom: 0;
+  left: -50px;
+  opacity: 0.1;
+}
+
+/* HEADER */
+.app-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 2.5rem;
+  padding: 1.5rem 0;
+  border-bottom: 2px solid var(--shc-bg-warm);
+  flex-wrap: wrap;
+  gap: 1rem;
+}
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  flex-wrap: wrap;
+}
+
+.user-info {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.375rem;
+  text-align: right;
+}
+
+.user-name {
+  font-weight: 600;
+  color: var(--shc-deep-green);
+  font-size: 0.95rem;
+}
+
+.user-dept {
+  font-size: 0.8rem;
+  color: var(--shc-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.logout-btn {
+  padding: 0.5rem 1.2rem;
+  font-size: 0.9rem;
+}
+
+.brand-group {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.brand-logo svg {
+  width: 48px;
+  height: 48px;
+  filter: drop-shadow(0 4px 6px rgba(55, 72, 31, 0.2));
+}
+
+.brand-text h1 {
+  font-family: var(--font-heading);
+  font-weight: 600;
+  font-size: 1.75rem;
+  color: var(--shc-deep-green);
+  margin: 0;
+  line-height: 1;
+  letter-spacing: -0.02em;
+}
+
+.brand-subtitle {
+  font-size: 0.85rem;
+  color: var(--shc-magenta);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-weight: 600;
+  margin-top: 4px;
+  display: block;
+}
+
+/* NAVIGATION PILLS */
+.nav-pills {
+  display: flex;
+  background: #fff;
+  padding: 0.4rem;
+  border-radius: 50px;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.04);
+  gap: 0.25rem;
+  margin-bottom: 2.5rem;
+  flex-wrap: wrap;
+}
+
+.main-content {
+  width: 100%;
+  max-width: 100%;
+  margin: 0 auto;
+}
+
+/* LOGIN SCREEN */
+.login-container {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: calc(100vh - 4rem);
+  padding: 2rem;
+}
+
+.login-card {
+  background: rgba(255, 255, 255, 0.85);
+  backdrop-filter: blur(12px);
+  border: 1px solid #fff;
+  border-radius: var(--radius-lg);
+  padding: 3rem;
+  box-shadow: var(--shadow-soft);
+  position: relative;
+  overflow: hidden;
+  max-width: 450px;
+  width: 100%;
+}
+
+.login-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 4px;
+  background: linear-gradient(90deg, var(--shc-deep-green), var(--shc-gold));
+}
+
+.login-brand {
+  justify-content: center;
+  margin-bottom: 2rem;
+}
+
+.login-brand .brand-text h1 {
+  text-align: center;
+}
+
+.login-form-section {
+  text-align: center;
+}
+
+.login-form-section h2 {
+  font-family: var(--font-heading);
+  color: var(--shc-deep-green);
+  font-size: 1.75rem;
+  margin: 0 0 0.5rem 0;
+}
+
+.login-subtitle {
+  color: var(--shc-text-secondary);
+  font-size: 0.95rem;
+  margin: 0 0 2rem 0;
+}
+
+.login-form {
+  text-align: left;
+  margin-bottom: 1.5rem;
+}
+
+.login-form .input-group {
+  margin-bottom: 1.25rem;
+}
+
+.login-btn {
+  width: 100%;
+  margin-top: 0.5rem;
+}
+
+.login-hint {
+  margin-top: 2rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--shc-bg-warm);
+  font-size: 0.85rem;
+  color: var(--shc-text-secondary);
+}
+
+.login-hint p {
+  margin: 0.25rem 0;
+}
+
+.hint-text {
+  font-family: monospace;
+  color: var(--shc-deep-green);
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.nav-pills button {
+  background: transparent;
+  border: none;
+  padding: 0.6rem 1.5rem;
+  border-radius: 40px;
+  font-family: var(--font-body);
+  font-weight: 600;
+  color: var(--shc-text-secondary);
+  cursor: pointer;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  font-size: 0.9rem;
+}
+
+.nav-pills button:hover {
+  color: var(--shc-deep-green);
+  background: rgba(55, 72, 31, 0.05);
+}
+
+.nav-pills button.active {
+  background: var(--shc-deep-green);
+  color: #fff;
+  box-shadow: 0 4px 12px rgba(55, 72, 31, 0.25);
+}
+
+/* GLASS CARD (Main Container) */
+.glass-card {
+  background: rgba(255, 255, 255, 0.85);
+  backdrop-filter: blur(12px);
+  border: 1px solid #fff;
+  border-radius: var(--radius-lg);
+  padding: 2.5rem;
+  box-shadow: var(--shadow-soft);
+  position: relative;
+  overflow: hidden;
+}
+
+/* Top accent border (Gold) */
+.glass-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 4px;
+  background: linear-gradient(90deg, var(--shc-deep-green), var(--shc-gold));
+}
+
+.card-header {
+  margin-bottom: 2.5rem;
+  padding-bottom: 1.5rem;
+  border-bottom: 1px solid rgba(55, 72, 31, 0.1);
+}
+
+.card-header h2 {
+  font-family: var(--font-heading);
+  color: var(--shc-deep-green);
+  font-size: 2rem;
+  margin: 0 0 0.75rem 0;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  line-height: 1.2;
+}
+
+.card-header h2::before {
+  content: '';
+  width: 4px;
+  height: 2rem;
+  background: linear-gradient(180deg, var(--shc-deep-green), var(--shc-gold));
+  border-radius: 2px;
+}
+
+.subtitle {
+  color: var(--shc-text-secondary);
+  font-size: 1rem;
+  margin: 0;
+  line-height: 1.6;
+  padding-left: 1.75rem;
+}
+
+/* FORM ELEMENTS */
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 1.5rem 2rem;
+  margin-bottom: 2rem;
+  padding: 2rem;
+  background: rgba(255, 255, 255, 0.5);
+  border-radius: var(--radius-md);
+  border: 1px solid rgba(55, 72, 31, 0.1);
+  align-items: start;
+}
+
+.input-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.625rem;
+  min-height: fit-content;
+}
+
+.input-group label {
+  margin-bottom: 0;
+  line-height: 1.4;
+}
+
+.input-group.full-width {
+  grid-column: span 2;
+}
+
+label {
+  font-size: 0.85rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--shc-text-secondary);
+  margin-bottom: 0;
+  display: block;
+  line-height: 1.4;
+}
+
+.input-group label {
+  margin-bottom: 0;
+}
+
+input, textarea, select {
+  background: #fff;
+  border: 2px solid var(--shc-border);
+  border-radius: var(--radius-sm);
+  padding: 0.95rem 1.1rem;
+  font-family: var(--font-body);
+  font-size: 1rem;
+  color: var(--shc-deep-green);
+  transition: all 0.25s ease;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+  width: 100%;
+  box-sizing: border-box;
+  line-height: 1.5;
+}
+
+textarea {
+  resize: vertical;
+  min-height: 80px;
+  line-height: 1.6;
+}
+
+input:hover, textarea:hover, select:hover {
+  border-color: var(--shc-gold);
+  box-shadow: 0 2px 12px rgba(219, 181, 87, 0.1);
+}
+
+input:focus, textarea:focus, select:focus {
+  outline: none;
+  border-color: var(--shc-gold);
+  box-shadow: 0 0 0 4px rgba(219, 181, 87, 0.2), 0 4px 12px rgba(0,0,0,0.08);
+  transform: translateY(-1px);
+}
+
+input.error, textarea.error, select.error {
+  border-color: var(--shc-magenta);
+  background-color: #fff5f5;
+}
+
+input.error:focus, textarea.error:focus, select.error:focus {
+  border-color: var(--shc-magenta);
+  box-shadow: 0 0 0 4px rgba(219, 68, 55, 0.15), 0 4px 12px rgba(0,0,0,0.08);
+}
+
+::placeholder {
+  color: #c0baa8;
+}
+
+/* Custom Select Styling */
+.select-wrapper {
+  position: relative;
+}
+.select-wrapper::after {
+  content: '▼';
+  font-size: 0.7rem;
+  color: var(--shc-gold);
+  position: absolute;
+  right: 1rem;
+  top: 50%;
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+select {
+  appearance: none;
+  width: 100%;
+  cursor: pointer;
+}
+
+/* CHECKBOX */
+.checkbox-group {
+  grid-column: span 2;
+  margin-top: 0.25rem;
+  padding-top: 0.5rem;
+}
+.checkbox-container {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  cursor: pointer;
+  font-size: 1rem;
+  text-transform: none;
+  color: var(--shc-deep-green);
+  font-weight: 500;
+  padding: 0.5rem 0;
+}
+.checkbox-container input {
+  display: none;
+}
+.checkmark {
+  width: 20px;
+  height: 20px;
+  border: 2px solid var(--shc-border);
+  border-radius: 6px;
+  background: #fff;
+  position: relative;
+  transition: all 0.2s;
+}
+.checkbox-container input:checked ~ .checkmark {
+  background: var(--shc-deep-green);
+  border-color: var(--shc-deep-green);
+}
+.checkmark::after {
+  content: '';
+  position: absolute;
+  left: 6px;
+  top: 2px;
+  width: 5px;
+  height: 10px;
+  border: solid white;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+  display: none;
+}
+.checkbox-container input:checked ~ .checkmark::after {
+  display: block;
+}
+
+/* BUTTONS */
+.btn-primary {
+  background: linear-gradient(135deg, var(--shc-deep-green), #4a5d2e);
+  color: #fff;
+  border: none;
+  padding: 1.1rem 2.5rem;
+  font-size: 1rem;
+  font-weight: 600;
+  border-radius: 50px;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  box-shadow: 0 10px 25px rgba(55, 72, 31, 0.25);
+  font-family: var(--font-body);
+  position: relative;
+  overflow: hidden;
+}
+
+.btn-primary::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -100%;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.2), transparent);
+  transition: left 0.5s;
+}
+
+.btn-primary:hover::before {
+  left: 100%;
+}
+
+.btn-primary:hover {
+  transform: translateY(-2px);
+  background: linear-gradient(135deg, #2b3a18, var(--shc-deep-green));
+  box-shadow: 0 15px 30px rgba(55, 72, 31, 0.35);
+}
+
+.btn-primary:active {
+  transform: translateY(0);
+}
+
+.btn-secondary {
+  background: white;
+  color: var(--shc-deep-green);
+  border: 1px solid var(--shc-border);
+  padding: 0.6rem 1.2rem;
+  border-radius: 50px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.btn-secondary:hover {
+  border-color: var(--shc-deep-green);
+  background: var(--shc-bg-sand);
+}
+
+/* TABLE STYLING */
+.table-container {
+  overflow-x: auto;
+}
+.styled-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 1rem;
+}
+.styled-table th {
+  text-align: left;
+  padding: 1rem;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--shc-text-secondary);
+  border-bottom: 2px solid var(--shc-bg-warm);
+}
+.styled-table td {
+  padding: 1.2rem 1rem;
+  border-bottom: 1px solid var(--shc-bg-warm);
+  font-size: 0.95rem;
+}
+.font-mono {
+  font-family: monospace;
+  color: var(--shc-gold);
+  font-weight: bold;
+}
+
+.employee-id {
+  color: var(--shc-text-secondary);
+  font-size: 0.85rem;
+  font-weight: normal;
+}
+.status-indicator {
+  display: inline-block;
+  padding: 0.25rem 0.75rem;
+  border-radius: 20px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  background: var(--shc-bg-warm);
+  color: var(--shc-text-secondary);
+}
+.status-indicator[data-status="Pending"] {
+  background: #fff8e1;
+  color: #b58900;
+}
+.status-indicator[data-status="Approved"] {
+  background: #e3f9e5;
+  color: var(--shc-deep-green);
+}
+
+/* TRANSITIONS */
+.fade-enter-active, .fade-leave-active {
+  transition: opacity 0.3s ease, transform 0.3s ease;
+}
+.fade-enter-from, .fade-leave-to {
+  opacity: 0;
+  transform: translateY(10px);
+}
+
+/* FORM VALIDATION */
+.required {
+  color: var(--shc-magenta);
+  font-weight: 700;
+  margin-left: 0.25rem;
+}
+
+.text-muted {
+  color: var(--shc-text-secondary);
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.error-message {
+  color: var(--shc-magenta);
+  font-size: 0.8rem;
+  margin-top: 0.375rem;
+  display: block;
+  line-height: 1.4;
+  font-weight: 500;
+}
+
+input.error, textarea.error, select.error {
+  border-color: var(--shc-magenta);
+  box-shadow: 0 0 0 4px rgba(92, 16, 48, 0.1);
+}
+
+.mt-1 {
+  margin-top: 0.5rem;
+}
+
+/* LOADING STATES */
+.spinner-small {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+  margin-right: 0.5rem;
+}
+
+.spinner {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  border: 2px solid rgba(55, 72, 31, 0.2);
+  border-top-color: var(--shc-deep-green);
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+  margin-right: 0.5rem;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.btn-primary:disabled, .btn-secondary:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.actions {
+  display: flex;
+  gap: 1rem;
+  justify-content: flex-end;
+  margin-top: 2rem;
+  padding-top: 2rem;
+  border-top: 2px solid rgba(55, 72, 31, 0.1);
+}
+
+.info-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  padding: 1.25rem 1.5rem;
+  border-radius: var(--radius-sm);
+  margin-bottom: 2rem;
+  line-height: 1.6;
+}
+
+.info-banner p {
+  margin: 0;
+  line-height: 1.6;
+  flex: 1;
+}
+
+/* FILTERS AND SEARCH */
+.filters-section {
+  margin-bottom: 1.5rem;
+  display: flex;
+  gap: 1rem;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.search-box {
+  flex: 1;
+  min-width: 250px;
+}
+
+.search-input {
+  width: 100%;
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--shc-border);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-body);
+  font-size: 0.95rem;
+  background: #fff;
+}
+
+.filter-group {
+  display: flex;
+  gap: 0.75rem;
+}
+
+.filter-select {
+  min-width: 150px;
+}
+
+.filter-select select {
+  padding: 0.75rem 1rem;
+  font-size: 0.9rem;
+}
+
+/* TABLE IMPROVEMENTS */
+.table-row-clickable {
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+.table-row-clickable:hover {
+  background-color: rgba(55, 72, 31, 0.03);
+}
+
+.btn-link {
+  background: none;
+  border: none;
+  color: var(--shc-deep-green);
+  font-weight: 600;
+  cursor: pointer;
+  padding: 0.25rem 0.5rem;
+  border-radius: 6px;
+  transition: all 0.2s;
+  font-size: 0.9rem;
+}
+
+.btn-link:hover {
+  background: rgba(55, 72, 31, 0.1);
+}
+
+/* EMPTY STATE */
+.empty-state {
+  text-align: center;
+  padding: 4rem 2rem;
+  color: var(--shc-text-secondary);
+}
+
+.empty-icon {
+  width: 64px;
+  height: 64px;
+  margin: 0 auto 1rem;
+  opacity: 0.3;
+}
+
+.empty-state p {
+  font-size: 1.1rem;
+  margin-bottom: 1rem;
+}
+
+/* MODAL */
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 2rem;
+}
+
+.modal-content {
+  background: #fff;
+  border-radius: var(--radius-lg);
+  max-width: 700px;
+  width: 100%;
+  max-height: 90vh;
+  overflow-y: auto;
+  box-shadow: 0 25px 50px rgba(0, 0, 0, 0.25);
+  position: relative;
+}
+
+.modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 1.5rem 2rem;
+  border-bottom: 1px solid var(--shc-bg-warm);
+}
+
+.modal-header h3 {
+  font-family: var(--font-heading);
+  color: var(--shc-deep-green);
+  margin: 0;
+  font-size: 1.5rem;
+}
+
+.modal-close {
+  background: none;
+  border: none;
+  font-size: 2rem;
+  color: var(--shc-text-secondary);
+  cursor: pointer;
+  line-height: 1;
+  padding: 0;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  transition: all 0.2s;
+}
+
+.modal-close:hover {
+  background: var(--shc-bg-warm);
+  color: var(--shc-deep-green);
+}
+
+.modal-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.status-update-group {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.status-select {
+  padding: 0.5rem 1rem;
+  border: 1px solid var(--shc-border);
+  border-radius: var(--radius-sm);
+  background: white;
+  font-size: 0.9rem;
+  color: var(--shc-text-primary);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.status-select:focus {
+  outline: none;
+  border-color: var(--shc-deep-green);
+  box-shadow: 0 0 0 3px rgba(55, 72, 31, 0.1);
+}
+
+.status-select:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.modal-body {
+  padding: 2rem;
+}
+
+.detail-section {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.detail-section-title {
+  font-family: var(--font-heading);
+  font-size: 1.2rem;
+  color: var(--shc-deep-green);
+  margin-top: 1.5rem;
+  margin-bottom: 0.5rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 2px solid var(--shc-bg-warm);
+}
+
+.detail-row {
+  display: grid;
+  grid-template-columns: 140px 1fr;
+  gap: 1rem;
+  align-items: start;
+}
+
+.detail-row.full-width {
+  grid-template-columns: 1fr;
+  flex-direction: column;
+}
+
+.detail-label {
+  font-weight: 700;
+  color: var(--shc-text-secondary);
+  font-size: 0.9rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.detail-description {
+  margin: 0.5rem 0 0 0;
+  color: var(--shc-text-primary);
+  line-height: 1.6;
+}
+
+/* URGENCY BADGES */
+.urgency-normal {
+  color: var(--shc-deep-green);
+}
+
+.urgency-urgent {
+  color: #b58900;
+}
+
+.urgency-critical {
+  color: var(--shc-magenta);
+}
+
+.urgency-badge[data-urgency="Normal"] {
+  background: #e3f9e5;
+  color: var(--shc-deep-green);
+}
+
+.urgency-badge[data-urgency="Urgent"] {
+  background: #fff8e1;
+  color: #b58900;
+}
+
+.urgency-badge[data-urgency="Critical"] {
+  background: #ffebee;
+  color: var(--shc-magenta);
+}
+
+/* STATUS INDICATORS ENHANCEMENT */
+.status-indicator[data-status="Pending"] {
+  background: #fff8e1;
+  color: #b58900;
+}
+
+.status-indicator[data-status="Approved"] {
+  background: #e3f9e5;
+  color: var(--shc-deep-green);
+}
+
+.status-indicator[data-status="BOOKED"] {
+  background: #e3f2fd;
+  color: #1976d2;
+}
+
+.status-indicator[data-status="IN_PROGRESS"] {
+  background: #fff3e0;
+  color: #f57c00;
+}
+
+.status-indicator[data-status="COMPLETED"] {
+  background: #e8f5e9;
+  color: #2e7d32;
+}
+
+.status-indicator[data-status="REJECTED"] {
+  background: #ffebee;
+  color: var(--shc-magenta);
+}
+
+.status-indicator[data-status="Inactive"] {
+  background: #f5f5f5;
+  color: #757575;
+}
+
+.status-indicator[data-status="INACTIVE"] {
+  background: #f5f5f5;
+  color: #757575;
+}
+
+/* ADMIN SECTION */
+.admin-section {
+  margin-bottom: 3rem;
+}
+
+.admin-section:last-child {
+  margin-bottom: 0;
+}
+
+.section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1.5rem;
+}
+
+.section-header h3 {
+  font-family: var(--font-heading);
+  color: var(--shc-deep-green);
+  font-size: 1.5rem;
+  margin: 0;
+}
+
+/* FEEDBACK MESSAGES */
+.feedback-container {
+  margin-top: 1rem;
+}
+
+.feedback {
+  padding: 1rem 1.5rem;
+  border-radius: var(--radius-sm);
+  font-weight: 500;
+}
+
+.feedback-container .feedback + .feedback {
+  margin-top: 0.5rem;
+}
+
+.feedback.success {
+  background: #e8f5e9;
+  color: #2e7d32;
+  border-left: 4px solid #2e7d32;
+}
+
+.feedback.error {
+  background: #ffebee;
+  color: var(--shc-magenta);
+  border-left: 4px solid var(--shc-magenta);
+}
+
+.flex-between {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+/* MODAL TRANSITIONS */
+.modal-enter-active, .modal-leave-active {
+  transition: opacity 0.3s ease;
+}
+
+.modal-enter-from, .modal-leave-to {
+  opacity: 0;
+}
+
+.modal-enter-active .modal-content, .modal-leave-active .modal-content {
+  transition: transform 0.3s ease, opacity 0.3s ease;
+}
+
+.modal-enter-from .modal-content, .modal-leave-to .modal-content {
+  transform: scale(0.9) translateY(-20px);
+  opacity: 0;
+}
+
+/* Toast Notifications */
+.toast-container {
+  position: fixed;
+  top: 2rem;
+  right: 2rem;
+  z-index: 10000;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  max-width: 400px;
+}
+
+.toast {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem 1.25rem;
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-soft);
+  background: white;
+  border-left: 4px solid;
+  animation: slideInRight 0.3s ease;
+  cursor: pointer;
+  transition: transform 0.2s;
+}
+
+.toast:hover {
+  transform: translateX(-4px);
+}
+
+.toast-success {
+  border-left-color: var(--shc-deep-green);
+  background: #f0f7f0;
+}
+
+.toast-error {
+  border-left-color: var(--shc-magenta);
+  background: #fff5f5;
+}
+
+.toast-info {
+  border-left-color: #1976d2;
+  background: #e3f2fd;
+}
+
+.toast-warning {
+  border-left-color: #b58900;
+  background: #fff8e1;
+}
+
+.toast-message {
+  flex: 1;
+  font-size: 0.9rem;
+  color: var(--shc-text-primary);
+  line-height: 1.4;
+}
+
+.toast-close {
+  margin-left: 1rem;
+  background: none;
+  border: none;
+  font-size: 1.5rem;
+  color: var(--shc-text-secondary);
+  cursor: pointer;
+  padding: 0;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  transition: all 0.2s;
+}
+
+.toast-close:hover {
+  background: rgba(0, 0, 0, 0.1);
+  color: var(--shc-text-primary);
+}
+
+@keyframes slideInRight {
+  from {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+.toast-enter-active,
+.toast-leave-active {
+  transition: all 0.3s ease;
+}
+
+.toast-enter-from {
+  transform: translateX(100%);
+  opacity: 0;
+}
+
+.toast-leave-to {
+  transform: translateX(100%);
+  opacity: 0;
+}
+
+/* Admin Panel Enhancements */
+.edit-input,
+.edit-select {
+  padding: 0.5rem;
+  border: 1px solid var(--shc-border);
+  border-radius: 6px;
+  font-size: 0.9rem;
+  width: 100%;
+  max-width: 200px;
+}
+
+.edit-input:focus,
+.edit-select:focus {
+  outline: none;
+  border-color: var(--shc-deep-green);
+  box-shadow: 0 0 0 3px rgba(55, 72, 31, 0.1);
+}
+
+.action-buttons {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.text-success {
+  color: var(--shc-deep-green);
+}
+
+.text-muted {
+  color: var(--shc-text-secondary);
+}
+
+/* RESPONSIVE */
+@media (max-width: 768px) {
+  .form-grid {
+    grid-template-columns: 1fr;
+  }
+  .input-group.full-width {
+    grid-column: span 1;
+  }
+  .app-header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  .header-right {
+    width: 100%;
+    justify-content: space-between;
+    margin-top: 1rem;
+  }
+  .user-info {
+    align-items: flex-start;
+  }
+  .nav-pills {
+    width: 100%;
+    overflow-x: auto;
+  }
+  .filters-section {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .filter-group {
+    flex-direction: column;
+  }
+  .filter-select {
+    width: 100%;
+  }
+  .modal-content {
+    margin: 1rem;
+    max-height: calc(100vh - 2rem);
+  }
+  .modal-header, .modal-body {
+    padding: 1.25rem;
+  }
+  .detail-row {
+    grid-template-columns: 1fr;
+    gap: 0.5rem;
+  }
+  .detail-label {
+    margin-bottom: 0.25rem;
+  }
+  .table-container {
+    overflow-x: auto;
+  }
+  .login-container {
+    padding: 1rem;
+    min-height: calc(100vh - 2rem);
+  }
+  .login-card {
+    padding: 2rem 1.5rem;
+  }
+  .toast-container {
+    top: 1rem;
+    right: 1rem;
+    left: 1rem;
+    max-width: none;
+  }
+  .action-buttons {
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+}
+</style>

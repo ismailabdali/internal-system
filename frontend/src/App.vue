@@ -1,337 +1,94 @@
 <script setup>
-import { ref, onMounted, computed } from 'vue';
+import { ref, onMounted, watch } from 'vue';
+import { useAuth } from './composables/useAuth';
+import { useToast } from './composables/useToast';
+import AppLayout from './components/AppLayout.vue';
+import LoginPage from './pages/LoginPage.vue';
+import CarBookingPage from './pages/CarBookingPage.vue';
+import ITRequestPage from './pages/ITRequestPage.vue';
+import OnboardingPage from './pages/OnboardingPage.vue';
+import MyRequestsPage from './pages/MyRequestsPage.vue';
+import AdminPage from './pages/AdminPage.vue';
+import FleetCalendarPage from './pages/FleetCalendarPage.vue';
 
-const currentTab = ref('car'); // 'car' | 'it' | 'onboarding' | 'requests'
+const { isLoggedIn, currentUser, checkAuth, clearAuth } = useAuth();
+const { toasts, showToast, removeToast } = useToast();
 
-const apiBase = 'http://localhost:4000/api';
+const currentTab = ref('car');
 
-// ---- Shared ----
-const requests = ref([]);
-const isLoadingRequests = ref(false);
-const requestError = ref('');
-const searchQuery = ref('');
-const statusFilter = ref('all');
-const typeFilter = ref('all');
-const selectedRequest = ref(null);
-const showRequestModal = ref(false);
-
-// Department options
-const departments = [
-  'Web Development',
-  'IT Support',
-  'HR',
-  'Finance',
-  'Operations',
-  'Management',
-  'Engineering',
-  'Administration'
-];
-
-const loadRequests = async () => {
-  isLoadingRequests.value = true;
-  requestError.value = '';
-  try {
-    const res = await fetch(`${apiBase}/requests`);
-    if (!res.ok) throw new Error('Failed to load requests');
-    requests.value = await res.json();
-  } catch (e) {
-    requestError.value = e.message;
-  } finally {
-    isLoadingRequests.value = false;
-  }
-};
-
-const loadRequestDetails = async (requestId) => {
-  try {
-    const res = await fetch(`${apiBase}/requests/${requestId}`);
-    if (!res.ok) throw new Error('Failed to load request details');
-    selectedRequest.value = await res.json();
-    showRequestModal.value = true;
-  } catch (e) {
-    requestError.value = e.message;
-  }
-};
-
-const filteredRequests = computed(() => {
-  let filtered = requests.value;
-  
-  // Filter by search query
-  if (searchQuery.value) {
-    const query = searchQuery.value.toLowerCase();
-    filtered = filtered.filter(r => 
-      r.title?.toLowerCase().includes(query) ||
-      r.requesterName?.toLowerCase().includes(query) ||
-      r.id.toString().includes(query) ||
-      r.description?.toLowerCase().includes(query)
-    );
-  }
-  
-  // Filter by status
-  if (statusFilter.value !== 'all') {
-    filtered = filtered.filter(r => r.status === statusFilter.value);
-  }
-  
-  // Filter by type
-  if (typeFilter.value !== 'all') {
-    filtered = filtered.filter(r => r.type === typeFilter.value);
-  }
-  
-  return filtered;
+// Check auth on mount and set default tab
+onMounted(async () => {
+  await checkAuth();
+  // Wait for auth to complete, then set default tab
+  // Use watch to handle async auth state
+  let unwatchFn = null;
+  unwatchFn = watch([isLoggedIn, currentUser], () => {
+    if (isLoggedIn.value && currentUser.value) {
+      const role = currentUser.value.role;
+      if (['SUPER_ADMIN', 'IT_ADMIN', 'HR_ADMIN', 'FLEET_ADMIN'].includes(role)) {
+        currentTab.value = 'requests';
+      } else {
+        currentTab.value = 'car';
+      }
+      // Stop watching after first set
+      if (unwatchFn) {
+        unwatchFn();
+      }
+    }
+  }, { immediate: true });
 });
 
-const autoDismissMessage = (messageRef, delay = 5000) => {
+// Handle login success
+const handleLoginSuccess = (user) => {
+  // Set default tab
+  if (['SUPER_ADMIN', 'IT_ADMIN', 'HR_ADMIN', 'FLEET_ADMIN'].includes(user.role)) {
+    currentTab.value = 'requests';
+  } else {
+    currentTab.value = 'car';
+  }
+  // Load requests after login
   setTimeout(() => {
-    messageRef.value = '';
-  }, delay);
-};
-
-onMounted(() => {
-  loadRequests();
-});
-
-// ---- Car booking ----
-const carForm = ref({
-  requesterName: '',
-  department: '',
-  startDatetime: '',
-  endDatetime: '',
-  pickupLocation: '',
-  destination: '',
-  reason: '',
-  passengers: '',
-  preferredType: ''
-});
-const carFormErrors = ref({});
-const carMessage = ref('');
-const carError = ref('');
-const isSubmittingCar = ref(false);
-
-const validateCarForm = () => {
-  carFormErrors.value = {};
-  let isValid = true;
-  
-  if (!carForm.value.requesterName?.trim()) {
-    carFormErrors.value.requesterName = 'Full name is required';
-    isValid = false;
-  }
-  if (!carForm.value.department?.trim()) {
-    carFormErrors.value.department = 'Department is required';
-    isValid = false;
-  }
-  if (!carForm.value.startDatetime) {
-    carFormErrors.value.startDatetime = 'Start date and time is required';
-    isValid = false;
-  }
-  if (!carForm.value.endDatetime) {
-    carFormErrors.value.endDatetime = 'End date and time is required';
-    isValid = false;
-  }
-  if (carForm.value.startDatetime && carForm.value.endDatetime) {
-    if (new Date(carForm.value.startDatetime) >= new Date(carForm.value.endDatetime)) {
-      carFormErrors.value.endDatetime = 'End date must be after start date';
-      isValid = false;
+    if (requestsPageRef.value) {
+      requestsPageRef.value.loadRequests();
     }
-  }
-  if (!carForm.value.reason?.trim()) {
-    carFormErrors.value.reason = 'Purpose of trip is required';
-    isValid = false;
-  }
-  if (!carForm.value.destination?.trim()) {
-    carFormErrors.value.destination = 'Destination is required';
-    isValid = false;
-  }
-  
-  return isValid;
+  }, 200);
 };
 
-const submitCarBooking = async () => {
-  carMessage.value = '';
-  carError.value = '';
-  carFormErrors.value = {};
-  
-  if (!validateCarForm()) {
-    return;
+// Handle logout
+const handleLogout = () => {
+  clearAuth();
+  currentTab.value = 'car';
+};
+
+// Handle tab change
+const handleTabChange = (tab) => {
+  currentTab.value = tab;
+};
+
+// Handle request submission (reload requests list)
+const handleRequestSubmitted = () => {
+  showToast('Request submitted successfully!', 'success');
+  // Reload requests if on requests page
+  if (currentTab.value === 'requests' && requestsPageRef.value) {
+    setTimeout(() => {
+      requestsPageRef.value.loadRequests();
+    }, 500);
   }
-  
-  isSubmittingCar.value = true;
-  try {
-    const res = await fetch(`${apiBase}/car-bookings`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(carForm.value)
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      throw new Error(data.error || 'Failed to book car');
+};
+
+// Handle view request from admin page
+const handleViewRequest = (requestId) => {
+  currentTab.value = 'requests';
+  // Wait for tab to switch, then load request details
+  setTimeout(() => {
+    if (requestsPageRef.value) {
+      requestsPageRef.value.loadRequestDetails(requestId);
     }
-    carMessage.value = `Car booked successfully (Vehicle: ${data.vehicle.name}, Booking ID: ${data.id})`;
-    autoDismissMessage(carMessage);
-    // reset only time / reason
-    carForm.value.startDatetime = '';
-    carForm.value.endDatetime = '';
-    carForm.value.reason = '';
-    carForm.value.destination = '';
-    carForm.value.passengers = '';
-    await loadRequests();
-  } catch (e) {
-    carError.value = e.message;
-    autoDismissMessage(carError, 8000);
-  } finally {
-    isSubmittingCar.value = false;
-  }
+  }, 300);
 };
 
-// ---- IT request ----
-const itForm = ref({
-  requesterName: '',
-  department: '',
-  title: '',
-  description: '',
-  category: 'Support / Incident',
-  systemName: '',
-  impact: 'Medium',
-  urgency: 'Normal',
-  assetTag: ''
-});
-const itFormErrors = ref({});
-const itMessage = ref('');
-const itError = ref('');
-const isSubmittingIT = ref(false);
-
-const validateITForm = () => {
-  itFormErrors.value = {};
-  let isValid = true;
-  
-  if (!itForm.value.requesterName?.trim()) {
-    itFormErrors.value.requesterName = 'Requester name is required';
-    isValid = false;
-  }
-  if (!itForm.value.department?.trim()) {
-    itFormErrors.value.department = 'Department is required';
-    isValid = false;
-  }
-  if (!itForm.value.title?.trim()) {
-    itFormErrors.value.title = 'Request title is required';
-    isValid = false;
-  }
-  if (!itForm.value.description?.trim()) {
-    itFormErrors.value.description = 'Description is required';
-    isValid = false;
-  }
-  
-  return isValid;
-};
-
-const submitIT = async () => {
-  itMessage.value = '';
-  itError.value = '';
-  itFormErrors.value = {};
-  
-  if (!validateITForm()) {
-    return;
-  }
-  
-  isSubmittingIT.value = true;
-  try {
-    const res = await fetch(`${apiBase}/it-requests`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(itForm.value)
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Failed to submit IT request');
-    itMessage.value = `IT request created (ID: ${data.requestId})`;
-    autoDismissMessage(itMessage);
-    itForm.value.title = '';
-    itForm.value.description = '';
-    itForm.value.systemName = '';
-    itForm.value.assetTag = '';
-    await loadRequests();
-  } catch (e) {
-    itError.value = e.message;
-    autoDismissMessage(itError, 8000);
-  } finally {
-    isSubmittingIT.value = false;
-  }
-};
-
-// ---- Onboarding ----
-const onboardingForm = ref({
-  requesterName: '',
-  department: '',
-  employeeName: '',
-  position: '',
-  location: '',
-  startDate: '',
-  deviceType: 'Business Laptop',
-  vpnRequired: false,
-  notes: ''
-});
-const onboardingFormErrors = ref({});
-const onboardingMessage = ref('');
-const onboardingError = ref('');
-const isSubmittingOnboarding = ref(false);
-
-const validateOnboardingForm = () => {
-  onboardingFormErrors.value = {};
-  let isValid = true;
-  
-  if (!onboardingForm.value.requesterName?.trim()) {
-    onboardingFormErrors.value.requesterName = 'Hiring manager name is required';
-    isValid = false;
-  }
-  if (!onboardingForm.value.department?.trim()) {
-    onboardingFormErrors.value.department = 'Department is required';
-    isValid = false;
-  }
-  if (!onboardingForm.value.employeeName?.trim()) {
-    onboardingFormErrors.value.employeeName = 'New hire name is required';
-    isValid = false;
-  }
-  if (!onboardingForm.value.position?.trim()) {
-    onboardingFormErrors.value.position = 'Position is required';
-    isValid = false;
-  }
-  if (!onboardingForm.value.startDate) {
-    onboardingFormErrors.value.startDate = 'Start date is required';
-    isValid = false;
-  }
-  
-  return isValid;
-};
-
-const submitOnboarding = async () => {
-  onboardingMessage.value = '';
-  onboardingError.value = '';
-  onboardingFormErrors.value = {};
-  
-  if (!validateOnboardingForm()) {
-    return;
-  }
-  
-  isSubmittingOnboarding.value = true;
-  try {
-    const res = await fetch(`${apiBase}/onboarding`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(onboardingForm.value)
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Failed to submit onboarding request');
-    onboardingMessage.value = `Onboarding created for ${data.employeeName} (Request ID: ${data.requestId})`;
-    autoDismissMessage(onboardingMessage);
-    onboardingForm.value.employeeName = '';
-    onboardingForm.value.position = '';
-    onboardingForm.value.startDate = '';
-    onboardingForm.value.notes = '';
-    await loadRequests();
-  } catch (e) {
-    onboardingError.value = e.message;
-    autoDismissMessage(onboardingError, 8000);
-  } finally {
-    isSubmittingOnboarding.value = false;
-  }
-};
+// Refs for child components
+const requestsPageRef = ref(null);
 </script>
 
 <template>
@@ -339,553 +96,69 @@ const submitOnboarding = async () => {
     <div class="bg-shape shape-1"></div>
     <div class="bg-shape shape-2"></div>
 
-    <header class="app-header">
-      <div class="brand-group">
-        <div class="brand-logo">
-          <svg viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <circle cx="20" cy="20" r="20" fill="var(--shc-deep-green)"/>
-            <path d="M20 40C8.9543 40 0 31.0457 0 20C0 8.9543 8.9543 0 20 0" fill="var(--shc-magenta)" style="mix-blend-mode: overlay; opacity: 0.6"/>
-            <circle cx="20" cy="20" r="12" stroke="var(--shc-gold)" stroke-width="1.5"/>
-          </svg>
-        </div>
-        <div class="brand-text">
-          <h1>Sultan Haitham City</h1>
-          <span class="brand-subtitle">Internal Services Portal</span>
-        </div>
-      </div>
+    <!-- Login Screen -->
+    <LoginPage v-if="!isLoggedIn" @login-success="handleLoginSuccess" />
 
-      <nav class="nav-pills">
-        <button 
-          v-for="tab in ['car', 'it', 'onboarding', 'requests']" 
-          :key="tab"
-          :class="{ active: currentTab === tab }" 
-          @click="currentTab = tab"
-        >
-          {{ tab.charAt(0).toUpperCase() + tab.slice(1) }}
-        </button>
-      </nav>
-    </header>
-
-    <main class="main-content">
+    <!-- Portal (shown when logged in) -->
+    <AppLayout 
+      v-else
+      :current-tab="currentTab"
+      @logout="handleLogout"
+      @tab-change="handleTabChange"
+    >
       <transition name="fade" mode="out-in">
-        
-        <div v-if="currentTab === 'car'" class="glass-card">
-          <div class="card-header">
-            <h2>Vehicle Requisition</h2>
-            <p class="subtitle">Book a fleet vehicle for official city business.</p>
-          </div>
+        <!-- Car Booking Page -->
+        <CarBookingPage 
+          v-if="currentTab === 'car'"
+          @submitted="handleRequestSubmitted"
+        />
 
-          <div class="form-grid">
-            <div class="input-group">
-              <label>Full Name <span class="required">*</span></label>
-              <input 
-                v-model="carForm.requesterName" 
-                type="text" 
-                placeholder="e.g. Ismail Al Abdali"
-                :class="{ 'error': carFormErrors.requesterName }"
-              />
-              <span v-if="carFormErrors.requesterName" class="error-message">{{ carFormErrors.requesterName }}</span>
-            </div>
-            <div class="input-group">
-              <label>Department <span class="required">*</span></label>
-              <div class="select-wrapper">
-                <select 
-                  v-model="carForm.department"
-                  :class="{ 'error': carFormErrors.department }"
-                >
-                  <option value="" disabled>Select Department</option>
-                  <option v-for="dept in departments" :key="dept" :value="dept">{{ dept }}</option>
-                  <option value="__other__">Other (specify)</option>
-                </select>
-              </div>
-              <input 
-                v-if="carForm.department === '__other__'"
-                v-model="carForm.department" 
-                type="text" 
-                placeholder="Enter department name"
-                class="mt-1"
-              />
-              <span v-if="carFormErrors.department" class="error-message">{{ carFormErrors.department }}</span>
-            </div>
-            <div class="input-group">
-              <label>Start Date & Time <span class="required">*</span></label>
-              <input 
-                v-model="carForm.startDatetime" 
-                type="datetime-local"
-                :class="{ 'error': carFormErrors.startDatetime }"
-              />
-              <span v-if="carFormErrors.startDatetime" class="error-message">{{ carFormErrors.startDatetime }}</span>
-            </div>
-            <div class="input-group">
-              <label>End Date & Time <span class="required">*</span></label>
-              <input 
-                v-model="carForm.endDatetime" 
-                type="datetime-local"
-                :class="{ 'error': carFormErrors.endDatetime }"
-              />
-              <span v-if="carFormErrors.endDatetime" class="error-message">{{ carFormErrors.endDatetime }}</span>
-            </div>
-            <div class="input-group">
-              <label>Pickup Location</label>
-              <input v-model="carForm.pickupLocation" type="text" placeholder="e.g. Main Office" />
-            </div>
-            <div class="input-group">
-              <label>Destination <span class="required">*</span></label>
-              <input 
-                v-model="carForm.destination" 
-                type="text"
-                :class="{ 'error': carFormErrors.destination }"
-              />
-              <span v-if="carFormErrors.destination" class="error-message">{{ carFormErrors.destination }}</span>
-            </div>
-            <div class="input-group full-width">
-              <label>Purpose of Trip <span class="required">*</span></label>
-              <textarea 
-                v-model="carForm.reason" 
-                rows="2" 
-                placeholder="Briefly describe the business need..."
-                :class="{ 'error': carFormErrors.reason }"
-              ></textarea>
-              <span v-if="carFormErrors.reason" class="error-message">{{ carFormErrors.reason }}</span>
-            </div>
-            <div class="input-group">
-              <label>Passengers</label>
-              <input v-model.number="carForm.passengers" type="number" min="1" />
-            </div>
-            <div class="input-group">
-              <label>Vehicle Preference</label>
-              <div class="select-wrapper">
-                <select v-model="carForm.preferredType">
-                  <option value="" disabled selected>Select Type</option>
-                  <option value="Sedan">Sedan (Standard)</option>
-                  <option value="SUV">SUV (Off-site)</option>
-                  <option value="Pickup">Pickup (Utility)</option>
-                </select>
-              </div>
-            </div>
-          </div>
+        <!-- IT Request Page -->
+        <ITRequestPage 
+          v-else-if="currentTab === 'it'"
+          @submitted="handleRequestSubmitted"
+        />
 
-          <div class="actions">
-            <button class="btn-primary" @click="submitCarBooking" :disabled="isSubmittingCar">
-              <span v-if="isSubmittingCar" class="spinner-small"></span>
-              <span>{{ isSubmittingCar ? 'Booking...' : 'Confirm Booking' }}</span>
-            </button>
-          </div>
-          
-          <transition name="fade">
-            <div v-if="carMessage || carError" class="feedback-container">
-              <div v-if="carMessage" class="feedback success">{{ carMessage }}</div>
-              <div v-if="carError" class="feedback error">{{ carError }}</div>
-            </div>
-          </transition>
-        </div>
+        <!-- Onboarding Page -->
+        <OnboardingPage 
+          v-else-if="currentTab === 'onboarding'"
+          @submitted="handleRequestSubmitted"
+        />
 
-        <div v-else-if="currentTab === 'it'" class="glass-card">
-          <div class="card-header">
-            <h2>IT Support & Assets</h2>
-            <p class="subtitle">Report technical issues or request hardware/software.</p>
-          </div>
+        <!-- My Requests Page -->
+        <MyRequestsPage 
+          v-else-if="currentTab === 'requests'"
+          ref="requestsPageRef"
+        />
 
-          <div class="form-grid">
-            <div class="input-group">
-              <label>Requester Name <span class="required">*</span></label>
-              <input 
-                v-model="itForm.requesterName" 
-                type="text"
-                :class="{ 'error': itFormErrors.requesterName }"
-              />
-              <span v-if="itFormErrors.requesterName" class="error-message">{{ itFormErrors.requesterName }}</span>
-            </div>
-            <div class="input-group">
-              <label>Department <span class="required">*</span></label>
-              <div class="select-wrapper">
-                <select 
-                  v-model="itForm.department"
-                  :class="{ 'error': itFormErrors.department }"
-                >
-                  <option value="" disabled>Select Department</option>
-                  <option v-for="dept in departments" :key="dept" :value="dept">{{ dept }}</option>
-                  <option value="__other__">Other (specify)</option>
-                </select>
-              </div>
-              <input 
-                v-if="itForm.department === '__other__'"
-                v-model="itForm.department" 
-                type="text" 
-                placeholder="Enter department name"
-                class="mt-1"
-              />
-              <span v-if="itFormErrors.department" class="error-message">{{ itFormErrors.department }}</span>
-            </div>
-            <div class="input-group full-width">
-              <label>Request Title <span class="required">*</span></label>
-              <input 
-                v-model="itForm.title" 
-                type="text" 
-                class="highlight-input" 
-                placeholder="What do you need help with?"
-                :class="{ 'error': itFormErrors.title }"
-              />
-              <span v-if="itFormErrors.title" class="error-message">{{ itFormErrors.title }}</span>
-            </div>
-            <div class="input-group full-width">
-              <label>Detailed Description <span class="required">*</span></label>
-              <textarea 
-                v-model="itForm.description" 
-                rows="3"
-                :class="{ 'error': itFormErrors.description }"
-              ></textarea>
-              <span v-if="itFormErrors.description" class="error-message">{{ itFormErrors.description }}</span>
-            </div>
-            <div class="input-group">
-              <label>Category</label>
-              <div class="select-wrapper">
-                <select v-model="itForm.category">
-                  <option>Support / Incident</option>
-                  <option>Devices & Materials</option>
-                  <option>Access & Permissions</option>
-                  <option>Software / License</option>
-                </select>
-              </div>
-            </div>
-            <div class="input-group">
-              <label>Urgency Level</label>
-              <div class="select-wrapper">
-                <select v-model="itForm.urgency" :class="`urgency-${itForm.urgency.toLowerCase()}`">
-                  <option>Normal</option>
-                  <option>Urgent</option>
-                  <option>Critical</option>
-                </select>
-              </div>
-            </div>
-          </div>
+        <!-- Admin Page -->
+        <AdminPage 
+          v-else-if="currentTab === 'admin'"
+          @view-request="handleViewRequest"
+        />
 
-          <div class="actions">
-            <button class="btn-primary" @click="submitIT" :disabled="isSubmittingIT">
-              <span v-if="isSubmittingIT" class="spinner-small"></span>
-              <span>{{ isSubmittingIT ? 'Submitting...' : 'Submit Ticket' }}</span>
-            </button>
-          </div>
-          <transition name="fade">
-            <div v-if="itMessage || itError" class="feedback-container">
-              <div v-if="itMessage" class="feedback success">{{ itMessage }}</div>
-              <div v-if="itError" class="feedback error">{{ itError }}</div>
-            </div>
-          </transition>
-        </div>
-
-        <div v-else-if="currentTab === 'onboarding'" class="glass-card">
-          <div class="card-header">
-            <h2>Employee Onboarding</h2>
-            <p class="subtitle">Prepare assets and accounts for new talent.</p>
-          </div>
-
-          <div class="form-grid">
-            <div class="input-group">
-              <label>Hiring Manager <span class="required">*</span></label>
-              <input 
-                v-model="onboardingForm.requesterName" 
-                type="text"
-                :class="{ 'error': onboardingFormErrors.requesterName }"
-              />
-              <span v-if="onboardingFormErrors.requesterName" class="error-message">{{ onboardingFormErrors.requesterName }}</span>
-            </div>
-            <div class="input-group">
-              <label>Department <span class="required">*</span></label>
-              <div class="select-wrapper">
-                <select 
-                  v-model="onboardingForm.department"
-                  :class="{ 'error': onboardingFormErrors.department }"
-                >
-                  <option value="" disabled>Select Department</option>
-                  <option v-for="dept in departments" :key="dept" :value="dept">{{ dept }}</option>
-                  <option value="__other__">Other (specify)</option>
-                </select>
-              </div>
-              <input 
-                v-if="onboardingForm.department === '__other__'"
-                v-model="onboardingForm.department" 
-                type="text" 
-                placeholder="Enter department name"
-                class="mt-1"
-              />
-              <span v-if="onboardingFormErrors.department" class="error-message">{{ onboardingFormErrors.department }}</span>
-            </div>
-            <div class="input-group">
-              <label>New Hire Name <span class="required">*</span></label>
-              <input 
-                v-model="onboardingForm.employeeName" 
-                type="text"
-                :class="{ 'error': onboardingFormErrors.employeeName }"
-              />
-              <span v-if="onboardingFormErrors.employeeName" class="error-message">{{ onboardingFormErrors.employeeName }}</span>
-            </div>
-            <div class="input-group">
-              <label>Position / Title <span class="required">*</span></label>
-              <input 
-                v-model="onboardingForm.position" 
-                type="text"
-                :class="{ 'error': onboardingFormErrors.position }"
-              />
-              <span v-if="onboardingFormErrors.position" class="error-message">{{ onboardingFormErrors.position }}</span>
-            </div>
-            <div class="input-group">
-              <label>Start Date <span class="required">*</span></label>
-              <input 
-                v-model="onboardingForm.startDate" 
-                type="date"
-                :class="{ 'error': onboardingFormErrors.startDate }"
-              />
-              <span v-if="onboardingFormErrors.startDate" class="error-message">{{ onboardingFormErrors.startDate }}</span>
-            </div>
-            <div class="input-group">
-              <label>Location</label>
-              <input v-model="onboardingForm.location" type="text" placeholder="e.g. Main Office" />
-            </div>
-            <div class="input-group">
-              <label>Primary Device</label>
-              <div class="select-wrapper">
-                <select v-model="onboardingForm.deviceType">
-                  <option>Business Laptop</option>
-                  <option>Engineer Laptop</option>
-                  <option>MacBook Pro</option>
-                </select>
-              </div>
-            </div>
-            <div class="input-group checkbox-group">
-              <label class="checkbox-container">
-                <input v-model="onboardingForm.vpnRequired" type="checkbox" />
-                <span class="checkmark"></span>
-                VPN Access Required
-              </label>
-            </div>
-            <div class="input-group full-width">
-              <label>Additional Notes</label>
-              <textarea v-model="onboardingForm.notes" rows="2" placeholder="Any additional information..."></textarea>
-            </div>
-          </div>
-
-          <div class="actions">
-            <button class="btn-primary" @click="submitOnboarding" :disabled="isSubmittingOnboarding">
-              <span v-if="isSubmittingOnboarding" class="spinner-small"></span>
-              <span>{{ isSubmittingOnboarding ? 'Creating...' : 'Initialize Onboarding' }}</span>
-            </button>
-          </div>
-          <transition name="fade">
-            <div v-if="onboardingMessage || onboardingError" class="feedback-container">
-              <div v-if="onboardingMessage" class="feedback success">{{ onboardingMessage }}</div>
-              <div v-if="onboardingError" class="feedback error">{{ onboardingError }}</div>
-            </div>
-          </transition>
-        </div>
-
-        <div v-else class="glass-card">
-          <div class="card-header flex-between">
-            <div>
-              <h2>Request History</h2>
-              <p class="subtitle">Track the status of your submissions.</p>
-            </div>
-            <button class="btn-secondary" @click="loadRequests" :disabled="isLoadingRequests">
-              <span v-if="isLoadingRequests" class="spinner-small"></span>
-              {{ isLoadingRequests ? 'Syncing...' : 'Refresh List' }}
-            </button>
-          </div>
-
-          <!-- Filters and Search -->
-          <div class="filters-section">
-            <div class="search-box">
-              <input 
-                v-model="searchQuery" 
-                type="text" 
-                placeholder="Search by ID, title, requester..."
-                class="search-input"
-              />
-            </div>
-            <div class="filter-group">
-              <div class="select-wrapper filter-select">
-                <select v-model="statusFilter">
-                  <option value="all">All Statuses</option>
-                  <option value="PENDING">Pending</option>
-                  <option value="BOOKED">Booked</option>
-                  <option value="IN_PROGRESS">In Progress</option>
-                  <option value="APPROVED">Approved</option>
-                  <option value="COMPLETED">Completed</option>
-                  <option value="REJECTED">Rejected</option>
-                </select>
-              </div>
-              <div class="select-wrapper filter-select">
-                <select v-model="typeFilter">
-                  <option value="all">All Types</option>
-                  <option value="CAR_BOOKING">Car Booking</option>
-                  <option value="IT">IT Request</option>
-                  <option value="ONBOARDING">Onboarding</option>
-                </select>
-              </div>
-            </div>
-          </div>
-
-          <div class="table-container">
-            <table v-if="filteredRequests.length" class="styled-table">
-              <thead>
-                <tr>
-                  <th>ID</th>
-                  <th>Type</th>
-                  <th>Title</th>
-                  <th>Requester</th>
-                  <th>Status</th>
-                  <th>Date</th>
-                  <th>Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="r in filteredRequests" :key="r.id" class="table-row-clickable" @click="loadRequestDetails(r.id)">
-                  <td class="font-mono">#{{ r.id }}</td>
-                  <td>
-                    <span class="type-pill" :class="r.type.toLowerCase().replace(' ','-')">{{ r.type }}</span>
-                  </td>
-                  <td class="fw-bold">{{ r.title }}</td>
-                  <td>{{ r.requesterName }}</td>
-                  <td>
-                    <span class="status-indicator" :data-status="r.status">{{ r.status }}</span>
-                  </td>
-                  <td class="text-muted">{{ new Date(r.createdAt).toLocaleDateString() }}</td>
-                  <td>
-                    <button class="btn-link" @click.stop="loadRequestDetails(r.id)">View</button>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-            <div v-else class="empty-state">
-              <svg class="empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-              </svg>
-              <p>{{ searchQuery || statusFilter !== 'all' || typeFilter !== 'all' ? 'No requests match your filters.' : 'No active requests found.' }}</p>
-              <button v-if="searchQuery || statusFilter !== 'all' || typeFilter !== 'all'" class="btn-secondary mt-2" @click="searchQuery = ''; statusFilter = 'all'; typeFilter = 'all'">Clear Filters</button>
-            </div>
-          </div>
-        </div>
-
+        <!-- Fleet Calendar Page -->
+        <FleetCalendarPage 
+          v-else-if="currentTab === 'fleet-calendar'"
+          @view-request="handleViewRequest"
+        />
       </transition>
-    </main>
+    </AppLayout>
 
-    <!-- Request Detail Modal -->
-    <transition name="modal">
-      <div v-if="showRequestModal && selectedRequest" class="modal-overlay" @click="showRequestModal = false">
-        <div class="modal-content" @click.stop>
-          <div class="modal-header">
-            <h3>Request Details #{{ selectedRequest.id }}</h3>
-            <button class="modal-close" @click="showRequestModal = false">×</button>
-          </div>
-          <div class="modal-body">
-            <div class="detail-section">
-              <div class="detail-row">
-                <span class="detail-label">Type:</span>
-                <span class="type-pill" :class="selectedRequest.type?.toLowerCase().replace(' ','-')">{{ selectedRequest.type }}</span>
-              </div>
-              <div class="detail-row">
-                <span class="detail-label">Status:</span>
-                <span class="status-indicator" :data-status="selectedRequest.status">{{ selectedRequest.status }}</span>
-              </div>
-              <div class="detail-row">
-                <span class="detail-label">Title:</span>
-                <span>{{ selectedRequest.title }}</span>
-              </div>
-              <div class="detail-row">
-                <span class="detail-label">Requester:</span>
-                <span>{{ selectedRequest.requesterName }}</span>
-              </div>
-              <div class="detail-row">
-                <span class="detail-label">Department:</span>
-                <span>{{ selectedRequest.department || 'N/A' }}</span>
-              </div>
-              <div class="detail-row">
-                <span class="detail-label">Created:</span>
-                <span>{{ new Date(selectedRequest.createdAt).toLocaleString() }}</span>
-              </div>
-              <div v-if="selectedRequest.description" class="detail-row full-width">
-                <span class="detail-label">Description:</span>
-                <p class="detail-description">{{ selectedRequest.description }}</p>
-              </div>
-              
-              <!-- Car Booking Details -->
-              <template v-if="selectedRequest.type === 'CAR_BOOKING' && selectedRequest.carBooking">
-                <div class="detail-section-title">Booking Information</div>
-                <div class="detail-row">
-                  <span class="detail-label">Vehicle:</span>
-                  <span>{{ selectedRequest.carBooking.vehicle?.name || 'N/A' }}</span>
-                </div>
-                <div class="detail-row">
-                  <span class="detail-label">Start:</span>
-                  <span>{{ new Date(selectedRequest.carBooking.startDatetime).toLocaleString() }}</span>
-                </div>
-                <div class="detail-row">
-                  <span class="detail-label">End:</span>
-                  <span>{{ new Date(selectedRequest.carBooking.endDatetime).toLocaleString() }}</span>
-                </div>
-                <div class="detail-row">
-                  <span class="detail-label">Destination:</span>
-                  <span>{{ selectedRequest.carBooking.destination || 'N/A' }}</span>
-                </div>
-                <div class="detail-row">
-                  <span class="detail-label">Passengers:</span>
-                  <span>{{ selectedRequest.carBooking.passengers || 'N/A' }}</span>
-                </div>
-              </template>
-
-              <!-- IT Request Details -->
-              <template v-if="selectedRequest.type === 'IT' && selectedRequest.itRequest">
-                <div class="detail-section-title">IT Details</div>
-                <div class="detail-row">
-                  <span class="detail-label">Category:</span>
-                  <span>{{ selectedRequest.itRequest.category }}</span>
-                </div>
-                <div class="detail-row">
-                  <span class="detail-label">Urgency:</span>
-                  <span class="status-indicator urgency-badge" :data-urgency="selectedRequest.itRequest.urgency">{{ selectedRequest.itRequest.urgency }}</span>
-                </div>
-                <div class="detail-row">
-                  <span class="detail-label">System:</span>
-                  <span>{{ selectedRequest.itRequest.systemName || 'N/A' }}</span>
-                </div>
-                <div class="detail-row">
-                  <span class="detail-label">Asset Tag:</span>
-                  <span>{{ selectedRequest.itRequest.assetTag || 'N/A' }}</span>
-                </div>
-              </template>
-
-              <!-- Onboarding Details -->
-              <template v-if="selectedRequest.type === 'ONBOARDING' && selectedRequest.onboarding">
-                <div class="detail-section-title">Onboarding Information</div>
-                <div class="detail-row">
-                  <span class="detail-label">Employee:</span>
-                  <span>{{ selectedRequest.onboarding.employeeName }}</span>
-                </div>
-                <div class="detail-row">
-                  <span class="detail-label">Position:</span>
-                  <span>{{ selectedRequest.onboarding.position }}</span>
-                </div>
-                <div class="detail-row">
-                  <span class="detail-label">Start Date:</span>
-                  <span>{{ new Date(selectedRequest.onboarding.startDate).toLocaleDateString() }}</span>
-                </div>
-                <div class="detail-row">
-                  <span class="detail-label">Device:</span>
-                  <span>{{ selectedRequest.onboarding.deviceType }}</span>
-                </div>
-                <div class="detail-row">
-                  <span class="detail-label">VPN Required:</span>
-                  <span>{{ selectedRequest.onboarding.vpnRequired ? 'Yes' : 'No' }}</span>
-                </div>
-                <div v-if="selectedRequest.onboarding.notes" class="detail-row full-width">
-                  <span class="detail-label">Notes:</span>
-                  <p class="detail-description">{{ selectedRequest.onboarding.notes }}</p>
-                </div>
-              </template>
-            </div>
-          </div>
+    <!-- Toast Notifications -->
+    <div class="toast-container">
+      <transition-group name="toast" tag="div">
+        <div
+          v-for="toast in toasts"
+          :key="toast.id"
+          :class="['toast', `toast-${toast.type}`]"
+          @click="removeToast(toast.id)"
+        >
+          <span class="toast-message">{{ toast.message }}</span>
+          <button class="toast-close" @click.stop="removeToast(toast.id)">×</button>
         </div>
-      </div>
-    </transition>
+      </transition-group>
+    </div>
   </div>
 </template>
 
@@ -911,6 +184,7 @@ const submitOnboarding = async () => {
   
   /* UI Elements */
   --radius-lg: 24px;
+  --radius-md: 16px;
   --radius-sm: 12px;
   --shadow-soft: 0 20px 40px -10px rgba(55, 72, 31, 0.08);
   --shadow-hover: 0 25px 50px -5px rgba(55, 72, 31, 0.12);
@@ -933,11 +207,13 @@ body {
 }
 
 .app-container {
-  max-width: 1080px;
+  max-width: 1200px;
   margin: 0 auto;
   padding: 2rem;
   position: relative;
   z-index: 1;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 /* Abstract Background Shapes for "Nature" feel */
@@ -970,9 +246,44 @@ body {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 3rem;
+  margin-bottom: 2.5rem;
+  padding: 1.5rem 0;
+  border-bottom: 2px solid var(--shc-bg-warm);
   flex-wrap: wrap;
   gap: 1rem;
+}
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  flex-wrap: wrap;
+}
+
+.user-info {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.375rem;
+  text-align: right;
+}
+
+.user-name {
+  font-weight: 600;
+  color: var(--shc-deep-green);
+  font-size: 0.95rem;
+}
+
+.user-dept {
+  font-size: 0.8rem;
+  color: var(--shc-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.logout-btn {
+  padding: 0.5rem 1.2rem;
+  font-size: 0.9rem;
 }
 
 .brand-group {
@@ -1015,6 +326,166 @@ body {
   border-radius: 50px;
   box-shadow: 0 4px 20px rgba(0,0,0,0.04);
   gap: 0.25rem;
+  margin-bottom: 2.5rem;
+  flex-wrap: wrap;
+}
+
+.main-content {
+  width: 100%;
+  max-width: 100%;
+  margin: 0 auto;
+}
+
+/* LOGIN SCREEN */
+.login-container {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: calc(100vh - 4rem);
+  padding: 2rem;
+}
+
+.login-card {
+  background: rgba(255, 255, 255, 0.85);
+  backdrop-filter: blur(12px);
+  border: 1px solid #fff;
+  border-radius: var(--radius-lg);
+  padding: 3rem;
+  box-shadow: var(--shadow-soft);
+  position: relative;
+  overflow: hidden;
+  max-width: 450px;
+  width: 100%;
+}
+
+.login-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 4px;
+  background: linear-gradient(90deg, var(--shc-deep-green), var(--shc-gold));
+}
+
+.login-brand {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 2.5rem;
+  gap: 1rem;
+}
+
+.login-brand .brand-logo {
+  display: flex;
+  justify-content: center;
+}
+
+.login-brand .brand-text {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+}
+
+.login-brand .brand-text h1 {
+  text-align: center;
+  margin-bottom: 0.25rem;
+}
+
+.login-brand .brand-subtitle {
+  text-align: center;
+}
+
+.login-form-section {
+  text-align: center;
+  width: 100%;
+}
+
+.login-form-section h2 {
+  font-family: var(--font-heading);
+  color: var(--shc-deep-green);
+  font-size: 1.75rem;
+  margin: 0 0 0.5rem 0;
+  font-weight: 600;
+}
+
+.login-form-section .text-muted {
+  display: block;
+  margin: 0 0 2rem 0;
+  font-size: 0.95rem;
+}
+
+.login-subtitle {
+  color: var(--shc-text-secondary);
+  font-size: 0.95rem;
+  margin: 0 0 2rem 0;
+}
+
+.login-form {
+  text-align: left;
+  margin-bottom: 1.5rem;
+  width: 100%;
+}
+
+.login-form .input-group {
+  margin-bottom: 1.5rem;
+  width: 100%;
+}
+
+.login-form .input-group label {
+  display: block;
+  margin-bottom: 0.5rem;
+  text-align: left;
+}
+
+.login-form .input-group input {
+  width: 100%;
+  box-sizing: border-box;
+  text-align: left;
+}
+
+.login-error {
+  margin-top: 1rem;
+  text-align: center;
+  display: block;
+}
+
+.login-btn {
+  width: 100%;
+  margin-top: 1.5rem;
+}
+
+.login-hint {
+  margin-top: 2rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--shc-bg-warm);
+  font-size: 0.85rem;
+  color: var(--shc-text-secondary);
+  text-align: center;
+  width: 100%;
+}
+
+.login-hint p {
+  margin: 0 0 0.75rem 0;
+  text-align: center;
+}
+
+.login-hint ul {
+  text-align: left;
+  display: inline-block;
+  margin: 0.5rem auto 0 auto;
+  padding-left: 1.5rem;
+  font-size: 0.9em;
+  list-style-position: outside;
+}
+
+.hint-text {
+  font-family: monospace;
+  color: var(--shc-deep-green);
+  font-weight: 600;
+  font-size: 0.9rem;
 }
 
 .nav-pills button {
@@ -1047,10 +518,11 @@ body {
   backdrop-filter: blur(12px);
   border: 1px solid #fff;
   border-radius: var(--radius-lg);
-  padding: 2.5rem;
+  padding: 3rem;
   box-shadow: var(--shadow-soft);
   position: relative;
   overflow: hidden;
+  max-width: 100%;
 }
 
 /* Top accent border (Gold) */
@@ -1065,38 +537,94 @@ body {
 }
 
 .card-header {
-  margin-bottom: 2rem;
+  margin-bottom: 2.5rem;
+  padding-bottom: 1.5rem;
+  border-bottom: 1px solid rgba(55, 72, 31, 0.1);
+  width: 100%;
+}
+
+.card-header.flex-between {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1.5rem;
+  flex-wrap: wrap;
+}
+
+.card-header.flex-between > div {
+  flex: 1;
+  min-width: 200px;
 }
 
 .card-header h2 {
   font-family: var(--font-heading);
   color: var(--shc-deep-green);
   font-size: 2rem;
-  margin: 0 0 0.5rem 0;
+  margin: 0 0 0.75rem 0;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  line-height: 1.2;
+}
+
+.card-header.flex-between h2 {
+  margin-bottom: 0.5rem;
+}
+
+.card-header h2::before {
+  content: '';
+  width: 4px;
+  height: 2rem;
+  background: linear-gradient(180deg, var(--shc-deep-green), var(--shc-gold));
+  border-radius: 2px;
+  flex-shrink: 0;
 }
 
 .subtitle {
   color: var(--shc-text-secondary);
   font-size: 1rem;
   margin: 0;
+  line-height: 1.6;
+  padding-left: 1.75rem;
+}
+
+.card-header.flex-between .subtitle {
+  padding-left: 1.75rem;
 }
 
 /* FORM ELEMENTS */
 .form-grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
-  gap: 1.5rem;
-  margin-bottom: 2.5rem;
+  gap: 1.5rem 2rem;
+  margin-bottom: 2rem;
+  padding: 2rem;
+  background: rgba(255, 255, 255, 0.5);
+  border-radius: var(--radius-md);
+  border: 1px solid rgba(55, 72, 31, 0.1);
+  align-items: start;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .input-group {
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
+  gap: 0.625rem;
+  min-height: fit-content;
+  width: 100%;
+}
+
+.input-group label {
+  margin-bottom: 0;
+  line-height: 1.4;
+  width: 100%;
+  display: block;
 }
 
 .input-group.full-width {
   grid-column: span 2;
+  width: 100%;
 }
 
 label {
@@ -1105,24 +633,56 @@ label {
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: var(--shc-text-secondary);
+  margin-bottom: 0;
+  display: block;
+  line-height: 1.4;
+}
+
+.input-group label {
+  margin-bottom: 0;
 }
 
 input, textarea, select {
   background: #fff;
-  border: 1px solid var(--shc-border);
+  border: 2px solid var(--shc-border);
   border-radius: var(--radius-sm);
-  padding: 0.9rem 1rem;
+  padding: 0.95rem 1.1rem;
   font-family: var(--font-body);
   font-size: 1rem;
   color: var(--shc-deep-green);
-  transition: all 0.2s ease;
-  box-shadow: 0 2px 5px rgba(0,0,0,0.02);
+  transition: all 0.25s ease;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+  width: 100%;
+  box-sizing: border-box;
+  line-height: 1.5;
+}
+
+textarea {
+  resize: vertical;
+  min-height: 80px;
+  line-height: 1.6;
+}
+
+input:hover, textarea:hover, select:hover {
+  border-color: var(--shc-gold);
+  box-shadow: 0 2px 12px rgba(219, 181, 87, 0.1);
 }
 
 input:focus, textarea:focus, select:focus {
   outline: none;
   border-color: var(--shc-gold);
-  box-shadow: 0 0 0 4px rgba(219, 181, 87, 0.15);
+  box-shadow: 0 0 0 4px rgba(219, 181, 87, 0.2), 0 4px 12px rgba(0,0,0,0.08);
+  transform: translateY(-1px);
+}
+
+input.error, textarea.error, select.error {
+  border-color: var(--shc-magenta);
+  background-color: #fff5f5;
+}
+
+input.error:focus, textarea.error:focus, select.error:focus {
+  border-color: var(--shc-magenta);
+  box-shadow: 0 0 0 4px rgba(219, 68, 55, 0.15), 0 4px 12px rgba(0,0,0,0.08);
 }
 
 ::placeholder {
@@ -1152,7 +712,8 @@ select {
 /* CHECKBOX */
 .checkbox-group {
   grid-column: span 2;
-  margin-top: 0.5rem;
+  margin-top: 0.25rem;
+  padding-top: 0.5rem;
 }
 .checkbox-container {
   display: flex;
@@ -1162,6 +723,8 @@ select {
   font-size: 1rem;
   text-transform: none;
   color: var(--shc-deep-green);
+  font-weight: 500;
+  padding: 0.5rem 0;
 }
 .checkbox-container input {
   display: none;
@@ -1197,23 +760,50 @@ select {
 
 /* BUTTONS */
 .btn-primary {
-  background: var(--shc-deep-green);
+  background: linear-gradient(135deg, var(--shc-deep-green), #4a5d2e);
   color: #fff;
   border: none;
-  padding: 1rem 2.5rem;
+  padding: 1.1rem 2.5rem;
   font-size: 1rem;
   font-weight: 600;
   border-radius: 50px;
   cursor: pointer;
-  transition: transform 0.2s, box-shadow 0.2s;
+  transition: all 0.3s ease;
   box-shadow: 0 10px 25px rgba(55, 72, 31, 0.25);
   font-family: var(--font-body);
+  position: relative;
+  overflow: hidden;
+}
+
+.btn-primary::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -100%;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.2), transparent);
+  transition: left 0.5s;
+}
+
+.btn-primary:hover::before {
+  left: 100%;
 }
 
 .btn-primary:hover {
   transform: translateY(-2px);
-  background: #2b3a18;
+  background: linear-gradient(135deg, #2b3a18, var(--shc-deep-green));
   box-shadow: 0 15px 30px rgba(55, 72, 31, 0.35);
+}
+
+.btn-primary:active {
+  transform: translateY(0);
+}
+
+.btn-primary:disabled, .btn-secondary:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  transform: none;
 }
 
 .btn-secondary {
@@ -1234,11 +824,14 @@ select {
 /* TABLE STYLING */
 .table-container {
   overflow-x: auto;
+  width: 100%;
+  box-sizing: border-box;
 }
 .styled-table {
   width: 100%;
   border-collapse: collapse;
   margin-top: 1rem;
+  table-layout: auto;
 }
 .styled-table th {
   text-align: left;
@@ -1248,16 +841,25 @@ select {
   letter-spacing: 0.05em;
   color: var(--shc-text-secondary);
   border-bottom: 2px solid var(--shc-bg-warm);
+  white-space: nowrap;
+  vertical-align: middle;
 }
 .styled-table td {
   padding: 1.2rem 1rem;
   border-bottom: 1px solid var(--shc-bg-warm);
   font-size: 0.95rem;
+  vertical-align: middle;
 }
 .font-mono {
   font-family: monospace;
   color: var(--shc-gold);
   font-weight: bold;
+}
+
+.employee-id {
+  color: var(--shc-text-secondary);
+  font-size: 0.85rem;
+  font-weight: normal;
 }
 .status-indicator {
   display: inline-block;
@@ -1276,6 +878,46 @@ select {
   background: #e3f9e5;
   color: var(--shc-deep-green);
 }
+.status-indicator[data-status="BOOKED"] {
+  background: #e3f2fd;
+  color: #1976d2;
+}
+.status-indicator[data-status="IN_PROGRESS"] {
+  background: #fff3e0;
+  color: #f57c00;
+}
+.status-indicator[data-status="COMPLETED"] {
+  background: #e8f5e9;
+  color: #2e7d32;
+}
+.status-indicator[data-status="REJECTED"] {
+  background: #ffebee;
+  color: var(--shc-magenta);
+}
+.status-indicator[data-status="Inactive"] {
+  background: #f5f5f5;
+  color: #757575;
+}
+.status-indicator[data-status="INACTIVE"] {
+  background: #f5f5f5;
+  color: #757575;
+}
+
+.type-pill {
+  display: inline-block;
+  padding: 0.25rem 0.75rem;
+  border-radius: 20px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  background: var(--shc-bg-warm);
+  color: var(--shc-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.fw-bold {
+  font-weight: 700;
+}
 
 /* TRANSITIONS */
 .fade-enter-active, .fade-leave-active {
@@ -1290,22 +932,30 @@ select {
 .required {
   color: var(--shc-magenta);
   font-weight: 700;
+  margin-left: 0.25rem;
+}
+
+.text-muted {
+  color: var(--shc-text-secondary);
+  font-size: 0.9rem;
+  line-height: 1.5;
 }
 
 .error-message {
   color: var(--shc-magenta);
-  font-size: 0.75rem;
-  margin-top: 0.25rem;
+  font-size: 0.8rem;
+  margin-top: 0.375rem;
   display: block;
-}
-
-input.error, textarea.error, select.error {
-  border-color: var(--shc-magenta);
-  box-shadow: 0 0 0 4px rgba(92, 16, 48, 0.1);
+  line-height: 1.4;
+  font-weight: 500;
 }
 
 .mt-1 {
   margin-top: 0.5rem;
+}
+
+.mt-2 {
+  margin-top: 1rem;
 }
 
 /* LOADING STATES */
@@ -1335,10 +985,36 @@ input.error, textarea.error, select.error {
   to { transform: rotate(360deg); }
 }
 
-.btn-primary:disabled, .btn-secondary:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-  transform: none;
+.actions {
+  display: flex;
+  gap: 1rem;
+  justify-content: flex-end;
+  margin-top: 2.5rem;
+  padding-top: 2rem;
+  border-top: 2px solid rgba(55, 72, 31, 0.1);
+  align-items: center;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.actions .btn-primary {
+  min-width: 180px;
+}
+
+.info-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  padding: 1.25rem 1.5rem;
+  border-radius: var(--radius-sm);
+  margin-bottom: 2rem;
+  line-height: 1.6;
+}
+
+.info-banner p {
+  margin: 0;
+  line-height: 1.6;
+  flex: 1;
 }
 
 /* FILTERS AND SEARCH */
@@ -1348,6 +1024,8 @@ input.error, textarea.error, select.error {
   gap: 1rem;
   flex-wrap: wrap;
   align-items: center;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .search-box {
@@ -1403,6 +1081,10 @@ input.error, textarea.error, select.error {
 
 .btn-link:hover {
   background: rgba(55, 72, 31, 0.1);
+}
+
+.text-success {
+  color: var(--shc-deep-green);
 }
 
 /* EMPTY STATE */
@@ -1463,7 +1145,9 @@ input.error, textarea.error, select.error {
   font-family: var(--font-heading);
   color: var(--shc-deep-green);
   margin: 0;
-  font-size: 1.5rem;
+  font-size: 1.75rem;
+  font-weight: 600;
+  line-height: 1.3;
 }
 
 .modal-close {
@@ -1488,31 +1172,79 @@ input.error, textarea.error, select.error {
   color: var(--shc-deep-green);
 }
 
+.modal-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.status-update-group {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.status-select {
+  padding: 0.5rem 1rem;
+  border: 1px solid var(--shc-border);
+  border-radius: var(--radius-sm);
+  background: white;
+  font-size: 0.9rem;
+  color: var(--shc-text-primary);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.status-select:focus {
+  outline: none;
+  border-color: var(--shc-deep-green);
+  box-shadow: 0 0 0 3px rgba(55, 72, 31, 0.1);
+}
+
+.status-select:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 .modal-body {
   padding: 2rem;
+  font-size: 1rem;
+  line-height: 1.6;
+  color: var(--shc-text-primary);
 }
 
 .detail-section {
   display: flex;
   flex-direction: column;
-  gap: 1rem;
+  gap: 1.25rem;
 }
 
 .detail-section-title {
   font-family: var(--font-heading);
-  font-size: 1.2rem;
+  font-size: 1.3rem;
+  font-weight: 600;
   color: var(--shc-deep-green);
-  margin-top: 1.5rem;
-  margin-bottom: 0.5rem;
-  padding-bottom: 0.5rem;
+  margin-top: 2rem;
+  margin-bottom: 1rem;
+  padding-bottom: 0.75rem;
   border-bottom: 2px solid var(--shc-bg-warm);
+}
+
+.detail-section-title:first-child {
+  margin-top: 0;
 }
 
 .detail-row {
   display: grid;
-  grid-template-columns: 140px 1fr;
-  gap: 1rem;
+  grid-template-columns: 160px 1fr;
+  gap: 1.25rem;
   align-items: start;
+  padding: 0.75rem 0;
+  border-bottom: 1px solid rgba(55, 72, 31, 0.05);
+}
+
+.detail-row:last-child {
+  border-bottom: none;
 }
 
 .detail-row.full-width {
@@ -1523,9 +1255,17 @@ input.error, textarea.error, select.error {
 .detail-label {
   font-weight: 700;
   color: var(--shc-text-secondary);
-  font-size: 0.9rem;
+  font-size: 0.85rem;
   text-transform: uppercase;
   letter-spacing: 0.05em;
+  line-height: 1.5;
+}
+
+.detail-row span:not(.detail-label) {
+  font-size: 1rem;
+  color: var(--shc-text-primary);
+  line-height: 1.6;
+  word-break: break-word;
 }
 
 .detail-description {
@@ -1562,35 +1302,27 @@ input.error, textarea.error, select.error {
   color: var(--shc-magenta);
 }
 
-/* STATUS INDICATORS ENHANCEMENT */
-.status-indicator[data-status="Pending"] {
-  background: #fff8e1;
-  color: #b58900;
+/* ADMIN SECTION */
+.admin-section {
+  margin-bottom: 3rem;
 }
 
-.status-indicator[data-status="Approved"] {
-  background: #e3f9e5;
+.admin-section:last-child {
+  margin-bottom: 0;
+}
+
+.section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1.5rem;
+}
+
+.section-header h3 {
+  font-family: var(--font-heading);
   color: var(--shc-deep-green);
-}
-
-.status-indicator[data-status="BOOKED"] {
-  background: #e3f2fd;
-  color: #1976d2;
-}
-
-.status-indicator[data-status="IN_PROGRESS"] {
-  background: #fff3e0;
-  color: #f57c00;
-}
-
-.status-indicator[data-status="COMPLETED"] {
-  background: #e8f5e9;
-  color: #2e7d32;
-}
-
-.status-indicator[data-status="REJECTED"] {
-  background: #ffebee;
-  color: var(--shc-magenta);
+  font-size: 1.5rem;
+  margin: 0;
 }
 
 /* FEEDBACK MESSAGES */
@@ -1644,6 +1376,135 @@ input.error, textarea.error, select.error {
   opacity: 0;
 }
 
+/* Toast Notifications */
+.toast-container {
+  position: fixed;
+  top: 2rem;
+  right: 2rem;
+  z-index: 10000;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  max-width: 400px;
+}
+
+.toast {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem 1.25rem;
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-soft);
+  background: white;
+  border-left: 4px solid;
+  animation: slideInRight 0.3s ease;
+  cursor: pointer;
+  transition: transform 0.2s;
+}
+
+.toast:hover {
+  transform: translateX(-4px);
+}
+
+.toast-success {
+  border-left-color: var(--shc-deep-green);
+  background: #f0f7f0;
+}
+
+.toast-error {
+  border-left-color: var(--shc-magenta);
+  background: #fff5f5;
+}
+
+.toast-info {
+  border-left-color: #1976d2;
+  background: #e3f2fd;
+}
+
+.toast-warning {
+  border-left-color: #b58900;
+  background: #fff8e1;
+}
+
+.toast-message {
+  flex: 1;
+  font-size: 0.9rem;
+  color: var(--shc-text-primary);
+  line-height: 1.4;
+}
+
+.toast-close {
+  margin-left: 1rem;
+  background: none;
+  border: none;
+  font-size: 1.5rem;
+  color: var(--shc-text-secondary);
+  cursor: pointer;
+  padding: 0;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  transition: all 0.2s;
+}
+
+.toast-close:hover {
+  background: rgba(0, 0, 0, 0.1);
+  color: var(--shc-text-primary);
+}
+
+@keyframes slideInRight {
+  from {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+.toast-enter-active,
+.toast-leave-active {
+  transition: all 0.3s ease;
+}
+
+.toast-enter-from {
+  transform: translateX(100%);
+  opacity: 0;
+}
+
+.toast-leave-to {
+  transform: translateX(100%);
+  opacity: 0;
+}
+
+/* Admin Panel Enhancements */
+.edit-input,
+.edit-select {
+  padding: 0.5rem;
+  border: 1px solid var(--shc-border);
+  border-radius: 6px;
+  font-size: 0.9rem;
+  width: 100%;
+  max-width: 200px;
+}
+
+.edit-input:focus,
+.edit-select:focus {
+  outline: none;
+  border-color: var(--shc-deep-green);
+  box-shadow: 0 0 0 3px rgba(55, 72, 31, 0.1);
+}
+
+.action-buttons {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
 /* RESPONSIVE */
 @media (max-width: 768px) {
   .form-grid {
@@ -1654,6 +1515,14 @@ input.error, textarea.error, select.error {
   }
   .app-header {
     flex-direction: column;
+    align-items: flex-start;
+  }
+  .header-right {
+    width: 100%;
+    justify-content: space-between;
+    margin-top: 1rem;
+  }
+  .user-info {
     align-items: flex-start;
   }
   .nav-pills {
@@ -1687,5 +1556,40 @@ input.error, textarea.error, select.error {
   .table-container {
     overflow-x: auto;
   }
+  .login-container {
+    padding: 1rem;
+    min-height: calc(100vh - 2rem);
+  }
+  .login-card {
+    padding: 2rem 1.5rem;
+  }
+  .toast-container {
+    top: 1rem;
+    right: 1rem;
+    left: 1rem;
+    max-width: none;
+  }
+  .action-buttons {
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+}
+
+/* Notes Section in Modal */
+.notes-section {
+  margin-top: 1.5rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--shc-bg-warm);
+}
+
+.note-input {
+  width: 100%;
+  padding: 0.75rem;
+  border: 2px solid var(--shc-border);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-body);
+  font-size: 0.95rem;
+  resize: vertical;
+  min-height: 80px;
 }
 </style>
