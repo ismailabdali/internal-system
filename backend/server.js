@@ -1609,24 +1609,19 @@ app.patch('/api/requests/:id/status', authRequired, (req, res) => {
         if (request.type === 'ONBOARDING') {
           // ONBOARDING workflow: SUBMITTED -> HR_REVIEW -> IT_SETUP -> COMPLETED
           if (userRole === 'HR_ADMIN') {
-            // HR_ADMIN can move: SUBMITTED -> HR_REVIEW -> IT_SETUP
+            // HR_ADMIN can update onboarding requests and move through workflow
+            // Allow status updates and workflow progression
             if (currentStep === 'IT_SETUP' || workflowStatus === 'IT_SETUP') {
               // When moving to IT_SETUP, change assigned_role to IT_ADMIN
               // This will be handled in the update below
-            } else if (request.currentStep !== 'SUBMITTED' && request.currentStep !== 'HR_REVIEW') {
-              return res.status(403).json({ error: 'HR Admin can only move onboarding from SUBMITTED to HR_REVIEW to IT_SETUP' });
             }
+            // HR_ADMIN can update status and workflow for onboarding requests
           } else if (userRole === 'IT_ADMIN') {
-            // IT_ADMIN can only update when current_step is IT_SETUP
+            // IT_ADMIN can update when current_step is IT_SETUP or workflowStatus is IT_SETUP
             if (request.currentStep !== 'IT_SETUP' && request.workflowStatus !== 'IT_SETUP') {
               return res.status(403).json({ error: 'IT Admin can only update onboarding requests in IT_SETUP step' });
             }
-            // IT_ADMIN can mark COMPLETED directly
-            if (status === 'COMPLETED' || workflowStatus === 'COMPLETED' || currentStep === 'COMPLETED') {
-              // Allow IT to complete
-            } else if (currentStep && currentStep !== 'IT_SETUP' && currentStep !== 'COMPLETED') {
-              return res.status(403).json({ error: 'IT Admin can only complete onboarding requests' });
-            }
+            // IT_ADMIN can update status (IN_PROGRESS, COMPLETED, etc.) for onboarding in IT_SETUP
           } else {
             return res.status(403).json({ error: 'You do not have permission to update this onboarding request' });
           }

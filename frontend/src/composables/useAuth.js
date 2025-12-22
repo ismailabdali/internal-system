@@ -29,9 +29,12 @@ export function useAuth() {
   const canUpdateRequest = (request) => {
     if (!request) return false;
     if (isSuperAdmin.value) return true;
+    // IT_ADMIN can update IT requests and ONBOARDING requests in IT_SETUP step
     if (isITAdmin.value && request.type === 'IT') return true;
     if (isITAdmin.value && request.type === 'ONBOARDING' && (request.currentStep === 'IT_SETUP' || request.workflowStatus === 'IT_SETUP')) return true;
+    // HR_ADMIN can update ONBOARDING requests
     if (isHRAdmin.value && request.type === 'ONBOARDING') return true;
+    // FLEET_ADMIN can update CAR_BOOKING requests
     if (isFleetAdmin.value && request.type === 'CAR_BOOKING') return true;
     return false;
   };
