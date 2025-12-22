@@ -214,7 +214,7 @@
               <td>{{ booking.destination || 'N/A' }}</td>
               <td>
                 <span class="status-indicator" :data-status="booking.status">
-                  {{ booking.status }}
+                  {{ formatStatus(booking.status) }}
                 </span>
               </td>
               <td>
@@ -331,10 +331,12 @@
 import { ref, onMounted, watch } from 'vue';
 import { useAuth } from '../composables/useAuth';
 import { useToast } from '../composables/useToast';
+import { useStatusFormatter } from '../composables/useStatusFormatter';
 
 const apiBase = 'http://localhost:4000/api';
 const { isSuperAdmin, isHRAdmin, isFleetAdmin, isITAdmin, canManageEmployees, canManageVehicles, authenticatedFetch } = useAuth();
 const { showToast } = useToast();
+const { formatStatus } = useStatusFormatter();
 
 const emit = defineEmits(['view-request']);
 

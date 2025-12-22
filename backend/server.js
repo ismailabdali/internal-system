@@ -524,6 +524,77 @@ const getNextStep = (requestType, currentStep) => {
   return workflow.steps[currentIndex + 1];
 };
 
+// Helper to map workflow step status to request status
+// This ensures consistency across all request types
+const mapWorkflowStatusToRequestStatus = (workflowStepStatus) => {
+  const statusMap = {
+    'SUBMITTED': 'PENDING',
+    'IN_REVIEW': 'APPROVED',
+    'IN_PROGRESS': 'IN_PROGRESS',
+    'COMPLETED': 'COMPLETED',
+    'BOOKED': 'BOOKED',
+    'AUTO_BOOKED': 'BOOKED',
+    'FLEET_REVIEW': 'APPROVED',
+    'TRIAGE': 'APPROVED',
+    'HR_REVIEW': 'APPROVED',
+    'IT_SETUP': 'IN_PROGRESS'
+  };
+  return statusMap[workflowStepStatus] || workflowStepStatus;
+};
+
+// Helper to get status from workflow step
+const getStatusFromWorkflowStep = (requestType, stepId) => {
+  const workflow = getWorkflow(requestType);
+  if (!workflow || !stepId) return 'PENDING';
+  const step = workflow.steps.find(s => s.id === stepId);
+  if (!step) return 'PENDING';
+  return mapWorkflowStatusToRequestStatus(step.status);
+};
+
+// Helper to normalize request status to match workflow step
+// This ensures consistency when loading requests from the database
+const normalizeRequestStatus = (request) => {
+  if (!request) return request;
+  
+  // Only normalize for request types that use workflow steps
+  if (request.type !== 'ONBOARDING' && request.type !== 'IT' && request.type !== 'CAR_BOOKING') {
+    return request;
+  }
+  
+  // Don't normalize if status is REJECTED or CANCELLED (these are terminal states)
+  if (request.status === 'REJECTED' || request.status === 'CANCELLED') {
+    return request;
+  }
+  
+  // Get the current step (handle both camelCase and snake_case)
+  const stepId = request.currentStep || request.current_step || request.workflowStatus || request.workflow_status;
+  if (!stepId) {
+    // If no step but status exists, keep it (might be an old record)
+    return request;
+  }
+  
+  // Get the correct status for this workflow step
+  const correctStatus = getStatusFromWorkflowStep(request.type, stepId);
+  
+  // Update the status if it doesn't match (but preserve REJECTED/CANCELLED)
+  if (request.status !== correctStatus && request.status !== 'REJECTED' && request.status !== 'CANCELLED') {
+    const oldStatus = request.status;
+    request.status = correctStatus;
+    // Update in database (async, non-blocking)
+    db.run(
+      'UPDATE requests SET status = ? WHERE id = ?',
+      [correctStatus, request.id],
+      (err) => {
+        if (err) {
+          logError('/normalize-status', 'update_status', err, { requestId: request.id, oldStatus, newStatus: correctStatus });
+        }
+      }
+    );
+  }
+  
+  return request;
+};
+
 // Helper to log request action for audit trail
 const logRequestAction = (requestId, actionType, fromStatus, toStatus, actorEmployeeId, note, callback) => {
   db.run(
@@ -816,7 +887,6 @@ app.post('/api/car-bookings', authRequired, (req, res) => {
   function createBooking(vehicle) {
     const title = `Car booking to ${destination || 'N/A'}`;
     const description = reason;
-    const status = 'BOOKED';
     const employeeId = req.user.id;
 
     // Validate employee_id is not null
@@ -839,6 +909,8 @@ app.post('/api/car-bookings', authRequired, (req, res) => {
       const workflowStatus = 'AUTO_BOOKED'; // Auto-assigned vehicle
       const currentStep = 'AUTO_BOOKED';
       const assignedRole = workflow?.assignedRole || 'FLEET_ADMIN';
+      // Status should match the workflow step - AUTO_BOOKED step uses BOOKED status
+      const status = getStatusFromWorkflowStep('CAR_BOOKING', currentStep);
 
       db.run(
         `
@@ -958,7 +1030,6 @@ app.post('/api/it-requests', authRequired, (req, res) => {
     return res.status(400).json({ error: `Invalid category. Must be one of: ${validCategories.join(', ')}` });
   }
 
-  const status = 'IN_PROGRESS';
   const employeeId = req.user.id;
 
   // Use immediate transaction mode to avoid locking issues
@@ -976,6 +1047,8 @@ app.post('/api/it-requests', authRequired, (req, res) => {
     const workflowStatus = 'SUBMITTED';
     const currentStep = 'SUBMITTED';
     const assignedRole = workflow?.assignedRole || 'IT_ADMIN';
+    // Status should match the workflow step - SUBMITTED step uses PENDING status
+    const status = getStatusFromWorkflowStep('IT', currentStep);
 
     db.run(
       `
@@ -1102,7 +1175,6 @@ app.post('/api/onboarding', authRequired, (req, res) => {
     return res.status(400).json({ error: 'Invalid start date' });
   }
 
-  const status = 'IN_PROGRESS';
   const title = `Onboarding for ${employeeName}`;
   const description = `Position: ${position} - Start: ${startDate}`;
   const employeeId = req.user.id;
@@ -1127,6 +1199,8 @@ app.post('/api/onboarding', authRequired, (req, res) => {
     const workflowStatus = 'SUBMITTED';
     const currentStep = 'SUBMITTED';
     const assignedRole = workflow?.assignedRole || 'HR_ADMIN';
+    // Status should match the workflow step - SUBMITTED step uses PENDING status
+    const status = getStatusFromWorkflowStep('ONBOARDING', currentStep);
 
     db.run(
       `
@@ -1211,11 +1285,12 @@ app.post('/api/onboarding', authRequired, (req, res) => {
                   `Device Type: ${deviceType}\n` +
                   `VPN Required: ${vpnRequired ? 'Yes' : 'No'}`;
                 
-                const itStatus = 'IN_PROGRESS';
                 const itWorkflow = getWorkflow('IT');
                 const itWorkflowStatus = 'SUBMITTED';
                 const itCurrentStep = 'SUBMITTED';
                 const itAssignedRole = itWorkflow?.assignedRole || 'IT_ADMIN';
+                // Status should match the workflow step - SUBMITTED step uses PENDING status
+                const itStatus = getStatusFromWorkflowStep('IT', itCurrentStep);
                 
                 // Create IT request in separate transaction (non-blocking)
                 db.run('BEGIN IMMEDIATE TRANSACTION', (beginErr2) => {
@@ -1382,11 +1457,14 @@ app.get('/api/requests', authRequired, (req, res) => {
   const conditions = [];
   
   // Role-based filtering:
-  // - Normal employee: only their own requests
-  // - IT_ADMIN: only IT requests
-  // - HR_ADMIN: only ONBOARDING requests
-  // - FLEET_ADMIN: only CAR_BOOKING requests
-  // - SUPER_ADMIN: all requests
+  // IMPORTANT: All requests (IT, ONBOARDING, CAR_BOOKING) are stored in the SAME 'requests' table.
+  // The 'type' column distinguishes between request types. All admins see ALL requests of their type,
+  // regardless of who created them (employee_id is not filtered for admins).
+  // - Normal employee: only their own requests (filtered by employee_id)
+  // - IT_ADMIN: ALL IT requests (type = 'IT') + Onboarding requests in IT_SETUP step
+  // - HR_ADMIN: ALL ONBOARDING requests (type = 'ONBOARDING')
+  // - FLEET_ADMIN: ALL CAR_BOOKING requests (type = 'CAR_BOOKING')
+  // - SUPER_ADMIN: all requests (no filter)
   if (userRole === 'SUPER_ADMIN') {
     // SUPER_ADMIN sees all - no filter needed unless query params specify
     const { type, status: statusFilter } = req.query;
@@ -1399,7 +1477,7 @@ app.get('/api/requests', authRequired, (req, res) => {
       params.push(statusFilter);
     }
   } else if (userRole === 'IT_ADMIN') {
-    // IT_ADMIN sees: All IT requests + Onboarding requests in IT_SETUP step
+    // IT_ADMIN sees: All IT requests (regardless of who created them) + Onboarding requests in IT_SETUP step
     conditions.push(`(
       type = ? OR 
       (type = ? AND (current_step = ? OR workflow_status = ?))
@@ -1428,7 +1506,9 @@ app.get('/api/requests', authRequired, (req, res) => {
       logError('/api/requests', 'select_requests', err, { userRole, userId });
       return res.status(500).json({ error: 'Failed to load requests. Please try again.' });
     }
-    res.json(rows);
+    // Normalize statuses to match workflow steps
+    const normalizedRows = rows.map(row => normalizeRequestStatus(row));
+    res.json(normalizedRows);
   });
 });
 
@@ -1459,10 +1539,13 @@ app.get('/api/requests/:id', authRequired, (req, res) => {
         return res.status(404).json({ error: 'Request not found' });
       }
       
+      // Normalize status to match workflow step
+      normalizeRequestStatus(request);
+      
       // Check permissions based on role:
       // - SUPER_ADMIN: can access any request
       // - IT_ADMIN: can access IT requests + ONBOARDING requests in IT_SETUP step
-      // - HR_ADMIN: can only access ONBOARDING requests
+      // - HR_ADMIN: can access ONBOARDING requests and IT requests
       // - FLEET_ADMIN: can only access CAR_BOOKING requests
       // - Normal employee: can only access their own requests
       let hasAccess = false;
@@ -1475,8 +1558,10 @@ app.get('/api/requests/:id', authRequired, (req, res) => {
         } else if (request.type === 'ONBOARDING' && (request.currentStep === 'IT_SETUP' || request.workflowStatus === 'IT_SETUP')) {
           hasAccess = true;
         }
-      } else if (userRole === 'HR_ADMIN' && request.type === 'ONBOARDING') {
-        hasAccess = true;
+      } else if (userRole === 'HR_ADMIN') {
+        if (request.type === 'ONBOARDING' || request.type === 'IT') {
+          hasAccess = true;
+        }
       } else if (userRole === 'FLEET_ADMIN' && request.type === 'CAR_BOOKING') {
         hasAccess = true;
       } else if (request.employeeId === userId) {
@@ -1626,9 +1711,10 @@ app.patch('/api/requests/:id/status', authRequired, (req, res) => {
             return res.status(403).json({ error: 'You do not have permission to update this onboarding request' });
           }
         } else if (request.type === 'IT') {
-          // IT requests: only IT_ADMIN can update
-          if (userRole !== 'IT_ADMIN') {
-            return res.status(403).json({ error: 'Only IT Admin can update IT requests' });
+          // IT requests: SUPER_ADMIN, IT_ADMIN, and HR_ADMIN can update
+          // (SUPER_ADMIN bypasses this check via the outer if condition)
+          if (userRole !== 'IT_ADMIN' && userRole !== 'HR_ADMIN') {
+            return res.status(403).json({ error: 'Only IT Admin or HR Admin can update IT requests' });
           }
         } else if (request.type === 'CAR_BOOKING') {
           // Car bookings: FLEET_ADMIN can update (but cancellation is handled above)
@@ -1651,7 +1737,36 @@ app.patch('/api/requests/:id/status', authRequired, (req, res) => {
         if (userRole === 'HR_ADMIN' || userRole === 'SUPER_ADMIN') {
           updateFields.push('assigned_role = ?');
           updateValues.push('IT_ADMIN');
+          // Status will be auto-updated below based on workflow step
         }
+      }
+      
+      // Auto-update status based on workflow step for all request types
+      // This ensures status matches the workflow step consistently
+      if ((currentStep || workflowStatus) && (request.type === 'ONBOARDING' || request.type === 'IT' || request.type === 'CAR_BOOKING')) {
+        const step = currentStep || workflowStatus || request.currentStep || request.workflowStatus;
+        const workflow = getWorkflow(request.type);
+        if (workflow) {
+          const stepDef = workflow.steps.find(s => s.id === step);
+          if (stepDef) {
+            // Map workflow step status to request status using helper function
+            const mappedStatus = mapWorkflowStatusToRequestStatus(stepDef.status);
+            
+            // Auto-update status when workflow step changes, unless status was explicitly provided
+            const stepChanged = (currentStep && currentStep !== request.currentStep) || 
+                               (workflowStatus && workflowStatus !== request.workflowStatus);
+            if (!status || stepChanged) {
+              updateFields.push('status = ?');
+              updateValues.push(mappedStatus);
+            }
+          }
+        }
+      }
+      
+      // Explicit status update (only if not auto-updated above)
+      if (status && !((request.type === 'ONBOARDING' || request.type === 'IT' || request.type === 'CAR_BOOKING') && (currentStep || workflowStatus))) {
+        updateFields.push('status = ?');
+        updateValues.push(status);
       }
       
       // Special handling for car booking cancellation
@@ -1665,11 +1780,6 @@ app.patch('/api/requests/:id/status', authRequired, (req, res) => {
           updateFields.push('current_step = ?');
           updateValues.push('CANCELLED');
         }
-      }
-      
-      if (status) {
-        updateFields.push('status = ?');
-        updateValues.push(status);
       }
       if (workflowStatus) {
         updateFields.push('workflow_status = ?');

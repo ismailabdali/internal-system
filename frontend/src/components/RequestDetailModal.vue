@@ -5,47 +5,67 @@
         <div class="modal-header">
           <h3>Request Details #{{ request.id }}</h3>
           <div class="modal-header-actions">
-            <div v-if="canUpdateRequest(request)" class="status-update-group">
-              <select 
-                :value="request.status" 
-                @change="handleStatusUpdate($event.target.value)"
-                :disabled="updatingStatus"
-                class="status-select"
-              >
-                <option value="PENDING">Pending</option>
-                <option value="APPROVED">Approved</option>
-                <option value="IN_PROGRESS">In Progress</option>
-                <option value="COMPLETED">Completed</option>
-                <option value="REJECTED">Rejected</option>
-                <option value="BOOKED">Booked</option>
-                <option value="CANCELLED">Cancelled</option>
-              </select>
-              <span v-if="updatingStatus" class="spinner-small"></span>
-            </div>
             <button class="modal-close" @click="$emit('close')">×</button>
           </div>
         </div>
         <div class="modal-body">
           <div class="detail-section">
+            <!-- Status Update Section for IT/HR Admins - Moved to Top -->
+            <div v-if="canUpdateRequest(request)" class="status-update-section status-update-section-top">
+              <div class="status-update-header">
+                <h4 class="status-update-title">Update Request Status</h4>
+                <span v-if="updatingStatus" class="status-update-feedback">Updating...</span>
+              </div>
+              <div class="status-update-content">
+                <div class="status-update-row">
+                  <label class="status-update-label">Change Status:</label>
+                  <div class="status-select-wrapper">
+                    <select 
+                      :value="request.status" 
+                      @change="handleStatusUpdate($event.target.value)"
+                      :disabled="updatingStatus"
+                      class="status-select-large"
+                    >
+                      <option value="PENDING">Pending</option>
+                      <option value="APPROVED">Approved</option>
+                      <option value="IN_PROGRESS">In Progress</option>
+                      <option value="COMPLETED">Completed</option>
+                      <option value="REJECTED">Rejected</option>
+                      <option value="BOOKED">Booked</option>
+                      <option value="CANCELLED">Cancelled</option>
+                    </select>
+                    <span v-if="updatingStatus" class="spinner-small" style="margin-left: 0.75rem;"></span>
+                  </div>
+                </div>
+                <small class="status-update-hint">
+                  Select a new status and it will be updated immediately
+                </small>
+              </div>
+            </div>
+            
+            <!-- Request Overview -->
             <div class="detail-row">
               <span class="detail-label">Type:</span>
               <span class="type-pill" :class="request.type?.toLowerCase().replace(' ','-')">{{ request.type }}</span>
             </div>
             <div class="detail-row">
               <span class="detail-label">Status:</span>
-              <span class="status-indicator" :data-status="request.status">{{ request.status }}</span>
+              <span class="status-indicator" :data-status="request.status">{{ formatStatus(request.status) }}</span>
             </div>
             <div v-if="request.workflowStatus" class="detail-row">
               <span class="detail-label">Workflow:</span>
-              <span class="status-indicator" :data-status="request.workflowStatus">{{ request.workflowStatus }}</span>
+              <span class="status-indicator" :data-status="request.workflowStatus">{{ formatStatus(request.workflowStatus) }}</span>
             </div>
             <div v-if="request.currentStep" class="detail-row">
               <span class="detail-label">Current Step:</span>
-              <span>{{ request.currentStep }}</span>
+              <span>{{ formatStatus(request.currentStep) }}</span>
             </div>
+            
+            <!-- Basic Information -->
+            <div class="detail-section-title">Request Information</div>
             <div class="detail-row">
               <span class="detail-label">Title:</span>
-              <span>{{ request.title }}</span>
+              <span class="fw-bold">{{ request.title }}</span>
             </div>
             <div v-if="canViewEmployeeId" class="detail-row">
               <span class="detail-label">Employee ID:</span>
@@ -173,23 +193,25 @@
             </template>
             
             <!-- Notes/Comments Section -->
-            <div v-if="canAddNotes(request)" class="detail-section-title">Notes & Comments</div>
-            <div v-if="canAddNotes(request)" class="notes-section">
-              <textarea
-                v-model="noteText"
-                placeholder="Add a note or comment about this request..."
-                rows="3"
-                class="note-input"
-              ></textarea>
-              <button 
-                class="btn-primary" 
-                @click="addNote"
-                :disabled="!noteText.trim() || addingNote"
-                style="margin-top: 0.5rem; padding: 0.75rem 1.5rem;"
-              >
-                <span v-if="addingNote" class="spinner-small"></span>
-                {{ addingNote ? 'Adding...' : 'Add Note' }}
-              </button>
+            <div v-if="canAddNotes(request)" class="notes-section-wrapper">
+              <div class="detail-section-title">Notes & Comments</div>
+              <div class="notes-section">
+                <textarea
+                  v-model="noteText"
+                  placeholder="Add a note or comment about this request..."
+                  rows="4"
+                  class="note-input"
+                ></textarea>
+                <button 
+                  class="btn-primary" 
+                  @click="addNote"
+                  :disabled="!noteText.trim() || addingNote"
+                  style="margin-top: 1rem; padding: 0.875rem 1.75rem; align-self: flex-start;"
+                >
+                  <span v-if="addingNote" class="spinner-small"></span>
+                  {{ addingNote ? 'Adding...' : 'Add Note' }}
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -202,6 +224,7 @@
 import { ref, watch } from 'vue';
 import { useAuth } from '../composables/useAuth';
 import { useToast } from '../composables/useToast';
+import { useStatusFormatter } from '../composables/useStatusFormatter';
 
 const props = defineProps({
   show: Boolean,
@@ -213,6 +236,7 @@ const emit = defineEmits(['close', 'status-update', 'add-note']);
 
 const { canUpdateRequest, canCancelBooking, canAddNotes, canViewEmployeeId } = useAuth();
 const { showToast } = useToast();
+const { formatStatus } = useStatusFormatter();
 
 const noteText = ref('');
 const addingNote = ref(false);

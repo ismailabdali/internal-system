@@ -28,12 +28,14 @@ export function useAuth() {
   // Check if user can update a specific request
   const canUpdateRequest = (request) => {
     if (!request) return false;
+    // SUPER_ADMIN can update any request
     if (isSuperAdmin.value) return true;
     // IT_ADMIN can update IT requests and ONBOARDING requests in IT_SETUP step
     if (isITAdmin.value && request.type === 'IT') return true;
     if (isITAdmin.value && request.type === 'ONBOARDING' && (request.currentStep === 'IT_SETUP' || request.workflowStatus === 'IT_SETUP')) return true;
-    // HR_ADMIN can update ONBOARDING requests
+    // HR_ADMIN can update ONBOARDING requests and IT requests
     if (isHRAdmin.value && request.type === 'ONBOARDING') return true;
+    if (isHRAdmin.value && request.type === 'IT') return true;
     // FLEET_ADMIN can update CAR_BOOKING requests
     if (isFleetAdmin.value && request.type === 'CAR_BOOKING') return true;
     return false;
@@ -58,7 +60,7 @@ export function useAuth() {
     if (!request) return false;
     if (isSuperAdmin.value) return true;
     if (isITAdmin.value && (request.type === 'IT' || (request.type === 'ONBOARDING' && (request.currentStep === 'IT_SETUP' || request.workflowStatus === 'IT_SETUP')))) return true;
-    if (isHRAdmin.value && request.type === 'ONBOARDING') return true;
+    if (isHRAdmin.value && (request.type === 'ONBOARDING' || request.type === 'IT')) return true;
     if (isFleetAdmin.value && request.type === 'CAR_BOOKING') return true;
     return false;
   };

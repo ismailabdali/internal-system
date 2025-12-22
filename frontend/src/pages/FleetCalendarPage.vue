@@ -101,7 +101,7 @@
           <div class="detail-row">
             <span class="detail-label">Status:</span>
             <span class="status-indicator" :data-status="selectedBooking.status">
-              {{ selectedBooking.status }}
+              {{ formatStatus(selectedBooking.status) }}
             </span>
           </div>
           <div class="booking-detail-actions">
@@ -117,10 +117,12 @@
 import { ref, computed, onMounted } from 'vue';
 import { useAuth } from '../composables/useAuth';
 import { useToast } from '../composables/useToast';
+import { useStatusFormatter } from '../composables/useStatusFormatter';
 
 const apiBase = 'http://localhost:4000/api';
 const { authenticatedFetch } = useAuth();
 const { showToast } = useToast();
+const { formatStatus } = useStatusFormatter();
 
 const emit = defineEmits(['view-request']);
 

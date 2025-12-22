@@ -74,7 +74,7 @@
             <td class="fw-bold">{{ r.title }}</td>
             <td>{{ r.requesterName }}</td>
             <td>
-              <span class="status-indicator" :data-status="r.status">{{ r.status }}</span>
+              <span class="status-indicator" :data-status="r.status">{{ formatStatus(r.status) }}</span>
             </td>
             <td class="text-muted">{{ new Date(r.createdAt).toLocaleDateString() }}</td>
             <td>
@@ -108,11 +108,13 @@
 import { ref, computed, onMounted } from 'vue';
 import { useAuth } from '../composables/useAuth';
 import { useToast } from '../composables/useToast';
+import { useStatusFormatter } from '../composables/useStatusFormatter';
 import RequestDetailModal from '../components/RequestDetailModal.vue';
 
 const apiBase = 'http://localhost:4000/api';
 const { isAdminUser, isSuperAdmin, isITAdmin, isHRAdmin, isFleetAdmin, canViewEmployeeId, authenticatedFetch } = useAuth();
 const { showToast } = useToast();
+const { formatStatus } = useStatusFormatter();
 
 const requests = ref([]);
 const isLoading = ref(false);
