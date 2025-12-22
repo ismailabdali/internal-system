@@ -128,7 +128,7 @@ import { useAuth } from '../composables/useAuth';
 import { useToast } from '../composables/useToast';
 
 const apiBase = 'http://localhost:4000/api';
-const { currentUser, isHRAdmin, isSuperAdmin, getAuthHeaders, clearAuth } = useAuth();
+const { currentUser, isHRAdmin, isSuperAdmin, authenticatedFetch } = useAuth();
 const { showToast } = useToast();
 
 const emit = defineEmits(['submitted']);
@@ -190,16 +190,10 @@ const handleSubmit = async () => {
   
   isSubmitting.value = true;
   try {
-    const res = await fetch(`${apiBase}/onboarding`, {
+    const res = await authenticatedFetch(`${apiBase}/onboarding`, {
       method: 'POST',
-      headers: getAuthHeaders(),
       body: JSON.stringify(form.value)
     });
-    if (res.status === 401) {
-      clearAuth();
-      showToast('Your session has expired. Please log in again.', 'error', 8000);
-      return;
-    }
     const data = await res.json();
     if (!res.ok) {
       const errorMsg = data.error || 'Failed to submit onboarding request';
@@ -224,7 +218,11 @@ const handleSubmit = async () => {
     
     emit('submitted');
   } catch (e) {
-    showToast(e.message, 'error', 8000);
+    if (e.message.includes('Session expired')) {
+      showToast('Your session has expired. Please log in again.', 'error', 8000);
+    } else {
+      showToast(e.message, 'error', 8000);
+    }
   } finally {
     isSubmitting.value = false;
   }

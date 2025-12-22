@@ -10,7 +10,7 @@
           <select v-model="selectedVehicleId" @change="loadSchedule">
             <option value="">All Vehicles</option>
             <option v-for="v in vehicles" :key="v.id" :value="v.id">
-              {{ v.name }} ({{ v.plate_number }})
+              {{ v.name }} ({{ formatPlateNumber(v.plate_number, v.plate_code) }})
             </option>
           </select>
         </div>
@@ -53,7 +53,7 @@
           <div class="vehicle-header">
             <div class="vehicle-info">
               <strong>{{ vehicle.name }}</strong>
-              <span class="vehicle-plate">{{ vehicle.plate_number }}</span>
+              <span class="vehicle-plate">{{ formatPlateNumber(vehicle.plate_number, vehicle.plate_code) }}</span>
             </div>
             <span class="vehicle-type">{{ vehicle.type }}</span>
           </div>
@@ -84,7 +84,7 @@
         <div class="booking-detail-body">
           <div class="detail-row">
             <span class="detail-label">Vehicle:</span>
-            <span>{{ selectedBooking.vehicleName }} ({{ selectedBooking.vehiclePlate }})</span>
+            <span>{{ selectedBooking.vehicleName }} ({{ formatPlateNumber(selectedBooking.vehiclePlateNumber, selectedBooking.vehiclePlateCode) }})</span>
           </div>
           <div class="detail-row">
             <span class="detail-label">Time:</span>
@@ -119,10 +119,24 @@ import { useAuth } from '../composables/useAuth';
 import { useToast } from '../composables/useToast';
 
 const apiBase = 'http://localhost:4000/api';
-const { getAuthHeaders, clearAuth } = useAuth();
+const { authenticatedFetch } = useAuth();
 const { showToast } = useToast();
 
 const emit = defineEmits(['view-request']);
+
+// Format plate number with code
+const formatPlateNumber = (number, code) => {
+  if (!number) return 'N/A';
+  try {
+    const num = String(number).trim();
+    if (!num) return 'N/A';
+    const cod = code ? String(code).trim().toUpperCase() : '';
+    return cod ? `${num} ${cod}` : num;
+  } catch (e) {
+    console.error('Error formatting plate number:', e);
+    return 'N/A';
+  }
+};
 
 const vehicles = ref([]);
 const bookings = ref([]);
@@ -164,13 +178,15 @@ const displayVehicles = computed(() => {
 
 const loadVehicles = async () => {
   try {
-    const res = await fetch(`${apiBase}/vehicles`, {
-      headers: getAuthHeaders()
-    });
+    const res = await authenticatedFetch(`${apiBase}/vehicles`);
     if (!res.ok) throw new Error('Failed to load vehicles');
     vehicles.value = await res.json();
   } catch (e) {
-    showToast(e.message, 'error');
+    if (e.message.includes('Session expired')) {
+      showToast('Your session has expired. Please log in again.', 'error', 8000);
+    } else {
+      showToast(e.message, 'error');
+    }
     vehicles.value = [];
   }
 };
@@ -193,15 +209,7 @@ const loadSchedule = async () => {
       params.append('vehicleId', selectedVehicleId.value);
     }
     
-    const res = await fetch(`${apiBase}/fleet/schedule?${params.toString()}`, {
-      headers: getAuthHeaders()
-    });
-    
-    if (res.status === 401) {
-      clearAuth();
-      showToast('Your session has expired. Please log in again.', 'error', 8000);
-      return;
-    }
+    const res = await authenticatedFetch(`${apiBase}/fleet/schedule?${params.toString()}`);
     
     if (!res.ok) {
       const data = await res.json();
@@ -210,7 +218,11 @@ const loadSchedule = async () => {
     
     bookings.value = await res.json();
   } catch (e) {
-    showToast(e.message, 'error');
+    if (e.message && e.message.includes('Session expired')) {
+      showToast('Your session has expired. Please log in again.', 'error', 8000);
+    } else {
+      showToast(e.message || 'Failed to load schedule', 'error');
+    }
     bookings.value = [];
   } finally {
     isLoading.value = false;
@@ -219,13 +231,17 @@ const loadSchedule = async () => {
 
 const getSlotClass = (vehicleId, slot) => {
   const booking = getBookingForSlot(vehicleId, slot);
-  if (booking) return 'booked';
+  if (booking) {
+    return 'booked';
+  }
   return 'available';
 };
 
 const getBookingForSlot = (vehicleId, slot) => {
   return bookings.value.find(booking => {
     if (booking.vehicleId !== vehicleId) return false;
+    // Don't show cancelled bookings in the calendar slots
+    if (booking.status === 'CANCELLED') return false;
     const bookingStart = new Date(booking.startDatetime);
     const bookingEnd = new Date(booking.endDatetime);
     const slotStart = new Date(slot.start);
@@ -321,6 +337,16 @@ onMounted(() => {
   border: 1px solid #f44336;
 }
 
+.legend-color.cancelled {
+  background: #f5f5f5;
+  border: 1px solid #9e9e9e;
+}
+
+.legend-color.cancelled {
+  background: #f5f5f5;
+  border: 1px solid #9e9e9e;
+}
+
 .vehicles-timeline {
   display: flex;
   flex-direction: column;
@@ -398,6 +424,15 @@ onMounted(() => {
   background: #ffebee;
   border-color: #f44336;
   color: var(--shc-magenta);
+  cursor: pointer;
+}
+
+.time-slot.cancelled {
+  background: #f5f5f5;
+  border-color: #9e9e9e;
+  color: #757575;
+  text-decoration: line-through;
+  opacity: 0.6;
   cursor: pointer;
 }
 

@@ -11,8 +11,27 @@ app.use(express.json());
 
 const PORT = 4000;
 
-// Simple in-memory token storage (in production, use Redis or database)
+// Token storage with expiration (in production, use Redis or database)
+// Structure: Map<token, { userId, expiresAt }>
 const activeTokens = new Map();
+
+// Token expiration time: 24 hours (in milliseconds)
+const TOKEN_EXPIRATION_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+// Clean up expired tokens every hour
+setInterval(() => {
+  const now = Date.now();
+  let cleaned = 0;
+  for (const [token, data] of activeTokens.entries()) {
+    if (data.expiresAt && data.expiresAt < now) {
+      activeTokens.delete(token);
+      cleaned++;
+    }
+  }
+  if (cleaned > 0) {
+    console.log(`[AUTH] Cleaned up ${cleaned} expired token(s)`);
+  }
+}, 60 * 60 * 1000); // Every hour
 
 // Helper function to hash passwords
 const hashPassword = (password) => {
@@ -57,10 +76,18 @@ const requireAuth = (req, res, next) => {
     return res.status(401).json({ error: 'No token provided' });
   }
   
-  const userId = activeTokens.get(token);
-  if (!userId) {
+  const tokenData = activeTokens.get(token);
+  if (!tokenData) {
     return res.status(401).json({ error: 'Invalid or expired token' });
   }
+  
+  // Check if token has expired
+  if (tokenData.expiresAt && tokenData.expiresAt < Date.now()) {
+    activeTokens.delete(token);
+    return res.status(401).json({ error: 'Token has expired. Please log in again.' });
+  }
+  
+  const userId = tokenData.userId;
   
   // Fetch employee from database
   waitForDb((dbErr) => {
@@ -148,7 +175,14 @@ const getEmployeeIdFromToken = (req) => {
   }
   const token = req.headers.authorization?.replace('Bearer ', '');
   if (!token) return null;
-  return activeTokens.get(token) || null;
+  const tokenData = activeTokens.get(token);
+  if (!tokenData) return null;
+  // Check expiration
+  if (tokenData.expiresAt && tokenData.expiresAt < Date.now()) {
+    activeTokens.delete(token);
+    return null;
+  }
+  return tokenData.userId || null;
 };
 
 // Helpers
@@ -302,14 +336,20 @@ app.post('/api/auth/login', (req, res) => {
         }
 
         console.log('[LOGIN] Employee found:', employee.email, employee.role);
-        // Generate token
+        // Generate token with expiration
         const token = generateToken();
-        activeTokens.set(token, employee.id);
+        const expiresAt = Date.now() + TOKEN_EXPIRATION_MS;
+        activeTokens.set(token, {
+          userId: employee.id,
+          expiresAt: expiresAt,
+          createdAt: Date.now()
+        });
         console.log('[LOGIN] Token generated, sending response...');
 
         // Return user info and token (exclude sensitive data)
         res.json({
           token,
+          tokenExpiresAt: expiresAt,
           user: {
             id: employee.id,
             email: employee.email,
@@ -333,10 +373,18 @@ app.get('/api/auth/me', (req, res) => {
     return res.status(401).json({ error: 'No token provided' });
   }
 
-  const userId = activeTokens.get(token);
-  if (!userId) {
+  const tokenData = activeTokens.get(token);
+  if (!tokenData) {
     return res.status(401).json({ error: 'Invalid or expired token' });
   }
+  
+  // Check if token has expired
+  if (tokenData.expiresAt && tokenData.expiresAt < Date.now()) {
+    activeTokens.delete(token);
+    return res.status(401).json({ error: 'Token has expired. Please log in again.' });
+  }
+  
+  const userId = tokenData.userId;
 
   // Wait for database to be ready
   waitForDb((dbErr) => {
@@ -363,6 +411,11 @@ app.get('/api/auth/me', (req, res) => {
           return res.status(404).json({ error: 'User not found' });
         }
 
+        // Extend token expiration on successful verification (refresh token)
+        const newExpiresAt = Date.now() + TOKEN_EXPIRATION_MS;
+        tokenData.expiresAt = newExpiresAt;
+        activeTokens.set(token, tokenData);
+        
         // Return user info (exclude sensitive data)
         res.json({
           id: employee.id,
@@ -371,10 +424,48 @@ app.get('/api/auth/me', (req, res) => {
           department: employee.department,
           role: employee.role,
           isLead: !!employee.is_lead,
-          createdAt: employee.created_at
+          createdAt: employee.created_at,
+          tokenExpiresAt: newExpiresAt
         });
       }
     );
+  });
+});
+
+// Token refresh endpoint - extends token expiration
+// This endpoint allows expired tokens within a grace period (1 hour) to be refreshed
+app.post('/api/auth/refresh', (req, res) => {
+  const token = req.headers.authorization?.replace('Bearer ', '');
+  
+  if (!token) {
+    return res.status(401).json({ error: 'No token provided' });
+  }
+  
+  const tokenData = activeTokens.get(token);
+  
+  if (!tokenData) {
+    return res.status(401).json({ error: 'Invalid or expired token' });
+  }
+  
+  // Allow refresh if token is expired but within grace period (1 hour)
+  const now = Date.now();
+  const gracePeriod = 60 * 60 * 1000; // 1 hour grace period
+  const isExpired = tokenData.expiresAt && tokenData.expiresAt < now;
+  const isWithinGracePeriod = isExpired && (now - tokenData.expiresAt) < gracePeriod;
+  
+  if (isExpired && !isWithinGracePeriod) {
+    activeTokens.delete(token);
+    return res.status(401).json({ error: 'Token has expired and cannot be refreshed' });
+  }
+  
+  // Extend token expiration
+  const newExpiresAt = Date.now() + TOKEN_EXPIRATION_MS;
+  tokenData.expiresAt = newExpiresAt;
+  activeTokens.set(token, tokenData);
+  
+  res.json({
+    message: 'Token refreshed successfully',
+    expiresAt: newExpiresAt
   });
 });
 
@@ -496,7 +587,7 @@ app.get('/api/car-bookings/available-slots', authRequired, (req, res) => {
   const startIso = startOfDay.toISOString();
   const endIso = endOfDay.toISOString();
   
-  // Get all bookings for the day
+  // Get all bookings for the day (excluding cancelled bookings)
   let query = `
     SELECT 
       cb.start_datetime,
@@ -504,8 +595,10 @@ app.get('/api/car-bookings/available-slots', authRequired, (req, res) => {
       cb.vehicle_id,
       v.name AS vehicle_name
     FROM car_bookings cb
+    INNER JOIN requests r ON cb.request_id = r.id
     LEFT JOIN vehicles v ON cb.vehicle_id = v.id
     WHERE cb.start_datetime >= ? AND cb.start_datetime <= ?
+      AND r.status != 'CANCELLED'
   `;
   
   const params = [startIso, endIso];
@@ -523,40 +616,95 @@ app.get('/api/car-bookings/available-slots', authRequired, (req, res) => {
       return res.status(500).json({ error: 'Failed to load available slots. Please try again.' });
     }
     
-    // Generate 30-minute time slots from 6 AM to 10 PM
-    const slots = [];
-    const startHour = 6;
-    const endHour = 22;
-    
-    for (let hour = startHour; hour < endHour; hour++) {
-      for (let minute = 0; minute < 60; minute += 30) {
-        const slotStart = new Date(dateObj);
-        slotStart.setHours(hour, minute, 0, 0);
-        const slotEnd = new Date(slotStart);
-        slotEnd.setMinutes(slotEnd.getMinutes() + 30);
-        
-        // Check if slot is available
-        const isAvailable = !bookings.some(booking => {
-          const bookingStart = new Date(booking.start_datetime);
-          const bookingEnd = new Date(booking.end_datetime);
-          return !(slotEnd <= bookingStart || slotStart >= bookingEnd);
-        });
-        
-        slots.push({
-          start: slotStart.toISOString(),
-          end: slotEnd.toISOString(),
-          startTime: `${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')}`,
-          endTime: `${slotEnd.getHours().toString().padStart(2, '0')}:${slotEnd.getMinutes().toString().padStart(2, '0')}`,
-          available: isAvailable
-        });
+    // If vehicleId is specified, check availability for that specific vehicle
+    if (vehicleId) {
+      // Generate 30-minute time slots from 6 AM to 10 PM
+      const slots = [];
+      const startHour = 6;
+      const endHour = 22;
+      
+      for (let hour = startHour; hour < endHour; hour++) {
+        for (let minute = 0; minute < 60; minute += 30) {
+          const slotStart = new Date(dateObj);
+          slotStart.setHours(hour, minute, 0, 0);
+          const slotEnd = new Date(slotStart);
+          slotEnd.setMinutes(slotEnd.getMinutes() + 30);
+          
+          // Check if slot is booked for this specific vehicle
+          const isBooked = bookings.some(booking => {
+            const bookingStart = new Date(booking.start_datetime);
+            const bookingEnd = new Date(booking.end_datetime);
+            return !(slotEnd <= bookingStart || slotStart >= bookingEnd);
+          });
+          
+          slots.push({
+            start: slotStart.toISOString(),
+            end: slotEnd.toISOString(),
+            startTime: `${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')}`,
+            endTime: `${slotEnd.getHours().toString().padStart(2, '0')}:${slotEnd.getMinutes().toString().padStart(2, '0')}`,
+            available: !isBooked
+          });
+        }
       }
+      
+      res.json({
+        date,
+        vehicleId: vehicleId || null,
+        slots
+      });
+    } else {
+      // Auto-assign mode: Get all active vehicles and check availability for each
+      db.all('SELECT id, name, plate_number, plate_code, type FROM vehicles WHERE status = ?', ['ACTIVE'], (err2, allVehicles) => {
+        if (err2) {
+          logError('/api/car-bookings/available-slots', 'select_vehicles', err2, { date });
+          return res.status(500).json({ error: 'Failed to load vehicles. Please try again.' });
+        }
+        
+        // Generate 30-minute time slots from 6 AM to 10 PM
+        const slots = [];
+        const startHour = 6;
+        const endHour = 22;
+        
+        for (let hour = startHour; hour < endHour; hour++) {
+          for (let minute = 0; minute < 60; minute += 30) {
+            const slotStart = new Date(dateObj);
+            slotStart.setHours(hour, minute, 0, 0);
+            const slotEnd = new Date(slotStart);
+            slotEnd.setMinutes(slotEnd.getMinutes() + 30);
+            
+            const slotStartIso = slotStart.toISOString();
+            const slotEndIso = slotEnd.toISOString();
+            
+            // Check if at least one vehicle is available for this slot
+            // A vehicle is available if it's not booked during this time slot
+            const hasAvailableVehicle = allVehicles.some(vehicle => {
+              // Check if this vehicle has any booking that overlaps with this slot
+              const isBooked = bookings.some(booking => {
+                if (booking.vehicle_id !== vehicle.id) return false;
+                const bookingStart = new Date(booking.start_datetime);
+                const bookingEnd = new Date(booking.end_datetime);
+                return !(slotEnd <= bookingStart || slotStart >= bookingEnd);
+              });
+              return !isBooked;
+            });
+            
+            slots.push({
+              start: slotStartIso,
+              end: slotEndIso,
+              startTime: `${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')}`,
+              endTime: `${slotEnd.getHours().toString().padStart(2, '0')}:${slotEnd.getMinutes().toString().padStart(2, '0')}`,
+              available: hasAvailableVehicle
+            });
+          }
+        }
+        
+        res.json({
+          date,
+          vehicleId: null,
+          slots
+        });
+      });
     }
-    
-    res.json({
-      date,
-      vehicleId: vehicleId || null,
-      slots
-    });
   });
 });
 
@@ -603,7 +751,9 @@ app.post('/api/car-bookings', authRequired, (req, res) => {
          AND v.status = 'ACTIVE'
       AND NOT EXISTS (
         SELECT 1 FROM car_bookings b
+        INNER JOIN requests r ON b.request_id = r.id
         WHERE b.vehicle_id = v.id
+        AND r.status != 'CANCELLED'
         AND NOT (b.end_datetime <= ? OR b.start_datetime >= ?)
          )`,
       [vehicleId, startIso, endIso],
@@ -619,7 +769,9 @@ app.post('/api/car-bookings', authRequired, (req, res) => {
        WHERE v.status = 'ACTIVE'
       AND NOT EXISTS (
         SELECT 1 FROM car_bookings b
+        INNER JOIN requests r ON b.request_id = r.id
         WHERE b.vehicle_id = v.id
+        AND r.status != 'CANCELLED'
         AND NOT (b.end_datetime <= ? OR b.start_datetime >= ?)
       )
        LIMIT 1`,
@@ -1339,7 +1491,7 @@ app.get('/api/requests/:id', authRequired, (req, res) => {
       if (request.type === 'CAR_BOOKING') {
         db.get(
           `
-            SELECT cb.*, v.name as vehicle_name, v.plate_number, v.type as vehicle_type
+            SELECT cb.*, v.name as vehicle_name, v.plate_number, v.plate_code, v.type as vehicle_type
             FROM car_bookings cb
             JOIN vehicles v ON cb.vehicle_id = v.id
             WHERE cb.request_id = ?
@@ -1363,6 +1515,7 @@ app.get('/api/requests/:id', authRequired, (req, res) => {
                 vehicle: {
                   name: carBooking.vehicle_name,
                   plateNumber: carBooking.plate_number,
+                  plateCode: carBooking.plate_code || '',
                   type: carBooking.vehicle_type
                 }
               } : null
@@ -1411,13 +1564,14 @@ app.get('/api/requests/:id', authRequired, (req, res) => {
 
 // ---------------- Update Request Status ----------------
 
-app.patch('/api/requests/:id/status', authRequired, requireRole('SUPER_ADMIN', 'IT_ADMIN', 'HR_ADMIN', 'FLEET_ADMIN'), (req, res) => {
+app.patch('/api/requests/:id/status', authRequired, (req, res) => {
   const requestId = req.params.id;
   const { status, workflowStatus, currentStep, note } = req.body;
   const userRole = req.user.role;
+  const userId = req.user.id;
 
-  // Get current request to check type and current status
-  db.get('SELECT type, status AS currentStatus, workflow_status AS currentWorkflowStatus, current_step AS currentStep, assigned_role AS assignedRole FROM requests WHERE id = ?', 
+  // Get current request to check type, current status, and ownership
+  db.get('SELECT type, status AS currentStatus, workflow_status AS currentWorkflowStatus, current_step AS currentStep, assigned_role AS assignedRole, employee_id AS employeeId FROM requests WHERE id = ?', 
     [requestId], 
     (err, request) => {
       if (err) {
@@ -1428,7 +1582,29 @@ app.patch('/api/requests/:id/status', authRequired, requireRole('SUPER_ADMIN', '
         return res.status(404).json({ error: 'Request not found' });
       }
 
-      // Role-based workflow validation
+      // Special handling for car booking cancellation: allow employees to cancel their own bookings
+      if (request.type === 'CAR_BOOKING' && status === 'CANCELLED') {
+        // Prevent canceling already cancelled or completed bookings
+        if (request.currentStatus === 'CANCELLED' || request.currentStatus === 'COMPLETED') {
+          return res.status(400).json({ error: 'Cannot cancel a booking that is already cancelled or completed' });
+        }
+        
+        // Require a note/reason for cancellation
+        if (!note || !note.trim()) {
+          return res.status(400).json({ error: 'A cancellation reason is required' });
+        }
+        
+        // Check permissions: Fleet Admin can cancel any booking, employees can only cancel their own
+        if (userRole === 'FLEET_ADMIN' || userRole === 'SUPER_ADMIN') {
+          // Fleet Admin can cancel any booking - allow through
+        } else if (userRole === 'EMPLOYEE' && request.employeeId === userId) {
+          // Employee can cancel their own booking - allow through
+        } else {
+          return res.status(403).json({ error: 'You can only cancel your own bookings' });
+        }
+      }
+
+      // Role-based workflow validation for non-cancellation updates
       if (userRole !== 'SUPER_ADMIN') {
         if (request.type === 'ONBOARDING') {
           // ONBOARDING workflow: SUBMITTED -> HR_REVIEW -> IT_SETUP -> COMPLETED
@@ -1460,8 +1636,8 @@ app.patch('/api/requests/:id/status', authRequired, requireRole('SUPER_ADMIN', '
             return res.status(403).json({ error: 'Only IT Admin can update IT requests' });
           }
         } else if (request.type === 'CAR_BOOKING') {
-          // Car bookings: FLEET_ADMIN can override
-          if (userRole !== 'FLEET_ADMIN' && userRole !== 'SUPER_ADMIN') {
+          // Car bookings: FLEET_ADMIN can update (but cancellation is handled above)
+          if (status !== 'CANCELLED' && userRole !== 'FLEET_ADMIN' && userRole !== 'SUPER_ADMIN') {
             return res.status(403).json({ error: 'Only Fleet Admin can update car booking requests' });
           }
         }
@@ -1480,6 +1656,19 @@ app.patch('/api/requests/:id/status', authRequired, requireRole('SUPER_ADMIN', '
         if (userRole === 'HR_ADMIN' || userRole === 'SUPER_ADMIN') {
           updateFields.push('assigned_role = ?');
           updateValues.push('IT_ADMIN');
+        }
+      }
+      
+      // Special handling for car booking cancellation
+      if (request.type === 'CAR_BOOKING' && status === 'CANCELLED') {
+        // When canceling, also update workflow status
+        if (!workflowStatus) {
+          updateFields.push('workflow_status = ?');
+          updateValues.push('CANCELLED');
+        }
+        if (!currentStep) {
+          updateFields.push('current_step = ?');
+          updateValues.push('CANCELLED');
         }
       }
       
@@ -1704,14 +1893,16 @@ app.patch('/api/car-bookings/:requestId/override', authRequired, requireRole('SU
         const checkStart = startDatetime || booking.start_datetime;
         const checkEnd = endDatetime || booking.end_datetime;
 
-        // Check if vehicle is available (excluding current booking)
+        // Check if vehicle is available (excluding current booking and cancelled bookings)
         db.get(
           `SELECT v.* FROM vehicles v
            WHERE v.id = ? AND v.status = 'ACTIVE'
            AND NOT EXISTS (
              SELECT 1 FROM car_bookings b
+             INNER JOIN requests r ON b.request_id = r.id
              WHERE b.vehicle_id = v.id
              AND b.request_id != ?
+             AND r.status != 'CANCELLED'
              AND NOT (b.end_datetime <= ? OR b.start_datetime >= ?)
            )`,
           [checkVehicleId, requestId, checkStart, checkEnd],
@@ -1861,7 +2052,8 @@ app.get('/api/fleet/schedule', authRequired, requireRole('SUPER_ADMIN', 'FLEET_A
       cb.passengers,
       v.id AS vehicleId,
       v.name AS vehicleName,
-      v.plate_number AS vehiclePlate,
+      v.plate_number AS vehiclePlateNumber,
+      v.plate_code AS vehiclePlateCode,
       v.type AS vehicleType,
       v.status AS vehicleStatus
     FROM requests r
@@ -2039,7 +2231,7 @@ app.patch('/api/admin/employees/:id/activate', authRequired, requireRole('SUPER_
 // Vehicle Management (SUPER_ADMIN, FLEET_ADMIN)
 app.get('/api/admin/vehicles', authRequired, requireRole('SUPER_ADMIN', 'FLEET_ADMIN'), (req, res) => {
   db.all(
-    `SELECT id, name, plate_number, type, status
+    `SELECT id, name, plate_number, plate_code, type, status
      FROM vehicles
      ORDER BY name`,
     [],
@@ -2054,17 +2246,19 @@ app.get('/api/admin/vehicles', authRequired, requireRole('SUPER_ADMIN', 'FLEET_A
 });
 
 app.post('/api/admin/vehicles', authRequired, requireRole('SUPER_ADMIN', 'FLEET_ADMIN'), (req, res) => {
-  const { name, plate_number, plateNumber, type } = req.body;
-  const plateNum = plate_number || plateNumber; // Support both formats
+  const { name, plateNumber, plateCode, type } = req.body;
 
-  if (!name || !plateNum) {
+  if (!name || !plateNumber) {
     return res.status(400).json({ error: 'Name and plate number are required' });
   }
 
+  // Plate code is optional, default to empty string if not provided
+  const code = plateCode || '';
+
   db.run(
-    `INSERT INTO vehicles (name, plate_number, type, status)
-     VALUES (?, ?, ?, 'ACTIVE')`,
-    [name, plateNum, type || ''],
+    `INSERT INTO vehicles (name, plate_number, plate_code, type, status)
+     VALUES (?, ?, ?, ?, 'ACTIVE')`,
+    [name, plateNumber, code, type || ''],
     function (err) {
       if (err) {
         console.error(err);
@@ -2073,7 +2267,8 @@ app.post('/api/admin/vehicles', authRequired, requireRole('SUPER_ADMIN', 'FLEET_
       res.json({
         id: this.lastID,
         name,
-        plate_number: plateNum,
+        plate_number: plateNumber,
+        plate_code: code,
         type: type || '',
         status: 'ACTIVE'
       });
@@ -2214,3 +2409,4 @@ waitForDb((dbErr) => {
     });
   });
 });
+

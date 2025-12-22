@@ -111,7 +111,7 @@ import { useToast } from '../composables/useToast';
 import RequestDetailModal from '../components/RequestDetailModal.vue';
 
 const apiBase = 'http://localhost:4000/api';
-const { isAdminUser, isSuperAdmin, isITAdmin, isHRAdmin, isFleetAdmin, canViewEmployeeId, getAuthHeaders, clearAuth } = useAuth();
+const { isAdminUser, isSuperAdmin, isITAdmin, isHRAdmin, isFleetAdmin, canViewEmployeeId, authenticatedFetch } = useAuth();
 const { showToast } = useToast();
 
 const requests = ref([]);
@@ -150,21 +150,18 @@ const filteredRequests = computed(() => {
 const loadRequests = async () => {
   isLoading.value = true;
   try {
-    const res = await fetch(`${apiBase}/requests`, {
-      headers: getAuthHeaders()
-    });
-    if (res.status === 401) {
-      clearAuth();
-      showToast('Your session has expired. Please log in again.', 'error', 8000);
-      return;
-    }
+    const res = await authenticatedFetch(`${apiBase}/requests`);
     if (!res.ok) {
       const data = await res.json();
       throw new Error(data.error || 'Failed to load requests');
     }
     requests.value = await res.json();
   } catch (e) {
-    showToast(e.message, 'error');
+    if (e.message.includes('Session expired')) {
+      showToast('Your session has expired. Please log in again.', 'error', 8000);
+    } else {
+      showToast(e.message, 'error');
+    }
   } finally {
     isLoading.value = false;
   }
@@ -172,14 +169,7 @@ const loadRequests = async () => {
 
 const loadRequestDetails = async (requestId) => {
   try {
-    const res = await fetch(`${apiBase}/requests/${requestId}`, {
-      headers: getAuthHeaders()
-    });
-    if (res.status === 401) {
-      clearAuth();
-      showToast('Your session has expired. Please log in again.', 'error', 8000);
-      return;
-    }
+    const res = await authenticatedFetch(`${apiBase}/requests/${requestId}`);
     if (!res.ok) {
       const data = await res.json();
       throw new Error(data.error || 'Failed to load request details');
@@ -187,23 +177,21 @@ const loadRequestDetails = async (requestId) => {
     selectedRequest.value = await res.json();
     showRequestModal.value = true;
   } catch (e) {
-    showToast(e.message, 'error');
+    if (e.message.includes('Session expired')) {
+      showToast('Your session has expired. Please log in again.', 'error', 8000);
+    } else {
+      showToast(e.message, 'error');
+    }
   }
 };
 
 const handleStatusUpdate = async (requestId, newStatus, note) => {
   updatingStatus.value = true;
   try {
-    const res = await fetch(`${apiBase}/requests/${requestId}/status`, {
+    const res = await authenticatedFetch(`${apiBase}/requests/${requestId}/status`, {
       method: 'PATCH',
-      headers: getAuthHeaders(),
       body: JSON.stringify({ status: newStatus, note: note || undefined })
     });
-    if (res.status === 401) {
-      clearAuth();
-      showToast('Your session has expired. Please log in again.', 'error', 8000);
-      return;
-    }
     if (!res.ok) {
       const data = await res.json();
       throw new Error(data.error || 'Failed to update request status');
@@ -212,6 +200,8 @@ const handleStatusUpdate = async (requestId, newStatus, note) => {
     
     if (data.autoITRequestCreated) {
       showToast(`Status updated to ${newStatus}. IT request #${data.autoITRequestId} auto-created for device setup!`, 'success', 10000);
+    } else if (newStatus === 'CANCELLED') {
+      showToast('Booking cancelled successfully', 'success');
     } else {
       showToast(`Request status updated to ${newStatus}`, 'success');
     }
@@ -219,7 +209,11 @@ const handleStatusUpdate = async (requestId, newStatus, note) => {
     await loadRequestDetails(requestId);
     await loadRequests();
   } catch (e) {
-    showToast(e.message, 'error', 8000);
+    if (e.message.includes('Session expired')) {
+      showToast('Your session has expired. Please log in again.', 'error', 8000);
+    } else {
+      showToast(e.message, 'error', 8000);
+    }
   } finally {
     updatingStatus.value = false;
   }
@@ -228,19 +222,13 @@ const handleStatusUpdate = async (requestId, newStatus, note) => {
 const handleAddNote = async (requestId, note) => {
   updatingStatus.value = true;
   try {
-    const res = await fetch(`${apiBase}/requests/${requestId}/status`, {
+    const res = await authenticatedFetch(`${apiBase}/requests/${requestId}/status`, {
       method: 'PATCH',
-      headers: getAuthHeaders(),
       body: JSON.stringify({ 
         status: selectedRequest.value?.status, // Keep current status
         note: note 
       })
     });
-    if (res.status === 401) {
-      clearAuth();
-      showToast('Your session has expired. Please log in again.', 'error', 8000);
-      return;
-    }
     if (!res.ok) {
       const data = await res.json();
       throw new Error(data.error || 'Failed to add note');
@@ -249,7 +237,11 @@ const handleAddNote = async (requestId, note) => {
     await loadRequestDetails(requestId);
     await loadRequests();
   } catch (e) {
-    showToast(e.message, 'error', 8000);
+    if (e.message.includes('Session expired')) {
+      showToast('Your session has expired. Please log in again.', 'error', 8000);
+    } else {
+      showToast(e.message, 'error', 8000);
+    }
   } finally {
     updatingStatus.value = false;
   }

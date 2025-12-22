@@ -894,6 +894,11 @@ select {
   background: #ffebee;
   color: var(--shc-magenta);
 }
+.status-indicator[data-status="CANCELLED"] {
+  background: #f5f5f5;
+  color: #757575;
+  text-decoration: line-through;
+}
 .status-indicator[data-status="Inactive"] {
   background: #f5f5f5;
   color: #757575;
@@ -1119,18 +1124,23 @@ select {
   align-items: center;
   justify-content: center;
   z-index: 1000;
-  padding: 2rem;
+  padding: 1rem;
+  box-sizing: border-box;
+  overflow: auto;
 }
 
 .modal-content {
   background: #fff;
   border-radius: var(--radius-lg);
-  max-width: 700px;
+  max-width: 800px;
   width: 100%;
-  max-height: 90vh;
+  max-height: calc(100vh - 2rem);
   overflow-y: auto;
+  overflow-x: hidden;
   box-shadow: 0 25px 50px rgba(0, 0, 0, 0.25);
   position: relative;
+  display: flex;
+  flex-direction: column;
 }
 
 .modal-header {
@@ -1139,6 +1149,8 @@ select {
   align-items: center;
   padding: 1.5rem 2rem;
   border-bottom: 1px solid var(--shc-bg-warm);
+  flex-shrink: 0;
+  min-height: fit-content;
 }
 
 .modal-header h3 {
@@ -1211,6 +1223,10 @@ select {
   font-size: 1rem;
   line-height: 1.6;
   color: var(--shc-text-primary);
+  overflow-y: auto;
+  overflow-x: hidden;
+  flex: 1;
+  min-height: 0;
 }
 
 .detail-section {
@@ -1540,11 +1556,16 @@ select {
     width: 100%;
   }
   .modal-content {
-    margin: 1rem;
-    max-height: calc(100vh - 2rem);
+    margin: 0.5rem;
+    max-height: calc(100vh - 1rem);
+    width: calc(100% - 1rem);
+    max-width: 100%;
   }
   .modal-header, .modal-body {
-    padding: 1.25rem;
+    padding: 1rem;
+  }
+  .modal-header h3 {
+    font-size: 1.25rem;
   }
   .detail-row {
     grid-template-columns: 1fr;

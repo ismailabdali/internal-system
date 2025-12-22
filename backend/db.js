@@ -359,10 +359,26 @@ function initializeTables() {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL,
         plate_number TEXT NOT NULL,
+        plate_code TEXT,
         type TEXT,
         status TEXT NOT NULL DEFAULT 'ACTIVE'
       )
-    `);
+    `, (err) => {
+      if (err) {
+        console.error('Error creating vehicles table:', err);
+      } else {
+        // Ensure plate_code column exists (migration for existing databases)
+        ensureTableSchema('vehicles', [
+          { name: 'plate_code', definition: 'TEXT' }
+        ], (err) => {
+          if (err) {
+            console.error('[MIGRATION] Failed to ensure vehicles table schema:', err);
+          } else {
+            console.log('[MIGRATION] vehicles table schema verified');
+          }
+        });
+      }
+    });
 
     // Car bookings
     db.run(`

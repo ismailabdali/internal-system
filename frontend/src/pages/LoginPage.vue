@@ -68,7 +68,7 @@ import { useAuth } from '../composables/useAuth';
 import { useToast } from '../composables/useToast';
 
 const apiBase = 'http://localhost:4000/api';
-const { isLoggedIn, currentUser, authToken, clearAuth } = useAuth();
+const { isLoggedIn, currentUser, authToken, clearAuth, startTokenRefresh } = useAuth();
 const { showToast } = useToast();
 
 const emit = defineEmits(['login-success']);
@@ -141,12 +141,24 @@ const handleLogin = async () => {
       localStorage.setItem('authToken', data.token);
       localStorage.setItem('currentUser', JSON.stringify(data.user));
       
+      // Store token expiration if provided (24 hours from now)
+      if (data.tokenExpiresAt) {
+        localStorage.setItem('tokenExpiresAt', data.tokenExpiresAt.toString());
+      } else {
+        // Default: 24 hours from now
+        const expiresAt = Date.now() + (24 * 60 * 60 * 1000);
+        localStorage.setItem('tokenExpiresAt', expiresAt.toString());
+      }
+      
       // Clear form
       loginForm.value.email = '';
       loginForm.value.password = '';
       loginError.value = '';
       
       isLoggedIn.value = true;
+      
+      // Start automatic token refresh
+      startTokenRefresh();
       
       // Emit success event
       emit('login-success', data.user);

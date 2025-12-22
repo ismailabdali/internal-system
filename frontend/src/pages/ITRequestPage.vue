@@ -86,7 +86,7 @@ import { useAuth } from '../composables/useAuth';
 import { useToast } from '../composables/useToast';
 
 const apiBase = 'http://localhost:4000/api';
-const { currentUser, getAuthHeaders, clearAuth } = useAuth();
+const { currentUser, authenticatedFetch } = useAuth();
 const { showToast } = useToast();
 
 const emit = defineEmits(['submitted']);
@@ -144,16 +144,10 @@ const handleSubmit = async () => {
   
   isSubmitting.value = true;
   try {
-    const res = await fetch(`${apiBase}/it-requests`, {
+    const res = await authenticatedFetch(`${apiBase}/it-requests`, {
       method: 'POST',
-      headers: getAuthHeaders(),
       body: JSON.stringify(form.value)
     });
-    if (res.status === 401) {
-      clearAuth();
-      showToast('Your session has expired. Please log in again.', 'error', 8000);
-      return;
-    }
     const data = await res.json();
     if (!res.ok) {
       const errorMsg = data.error || 'Failed to submit IT request';

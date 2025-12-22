@@ -205,7 +205,7 @@
                 <span v-else class="text-muted">Unassigned</span>
                 <br>
                 <span class="font-mono" style="font-size: 0.85rem; color: var(--shc-text-secondary);">
-                  {{ booking.vehiclePlate || 'N/A' }}
+                  {{ formatPlateNumber(booking.vehiclePlateNumber, booking.vehiclePlateCode) || 'N/A' }}
                 </span>
               </td>
               <td>{{ new Date(booking.startDatetime).toLocaleString() }}</td>
@@ -247,7 +247,25 @@
         </div>
         <div class="input-group">
           <label>Plate Number <span class="required">*</span></label>
-          <input v-model="newVehicleForm.plateNumber" type="text" placeholder="e.g. M-1234" />
+          <div style="display: flex; gap: 0.5rem; align-items: center;">
+            <input 
+              v-model="newVehicleForm.plateNumber" 
+              type="text" 
+              placeholder="e.g. 6598" 
+              style="flex: 1;"
+              maxlength="10"
+            />
+            <input 
+              v-model="newVehicleForm.plateCode" 
+              type="text" 
+              placeholder="e.g. HY" 
+              style="width: 80px; text-transform: uppercase;"
+              maxlength="5"
+            />
+          </div>
+          <small style="color: var(--shc-text-secondary); font-size: 0.85rem; margin-top: 0.25rem; display: block;">
+            Format: Number (e.g. 6598) and Code (e.g. HY)
+          </small>
         </div>
         <div class="input-group">
           <label>Vehicle Type</label>
@@ -283,7 +301,7 @@
           <tbody>
             <tr v-for="vehicle in vehicles" :key="vehicle.id">
               <td class="fw-bold">{{ vehicle.name }}</td>
-              <td class="font-mono">{{ vehicle.plate_number }}</td>
+              <td class="font-mono">{{ formatPlateNumber(vehicle.plate_number, vehicle.plate_code) }}</td>
               <td>{{ vehicle.type || 'N/A' }}</td>
               <td>
                 <span class="status-indicator" :data-status="vehicle.status">
@@ -315,10 +333,24 @@ import { useAuth } from '../composables/useAuth';
 import { useToast } from '../composables/useToast';
 
 const apiBase = 'http://localhost:4000/api';
-const { isSuperAdmin, isHRAdmin, isFleetAdmin, isITAdmin, canManageEmployees, canManageVehicles, getAuthHeaders, clearAuth } = useAuth();
+const { isSuperAdmin, isHRAdmin, isFleetAdmin, isITAdmin, canManageEmployees, canManageVehicles, authenticatedFetch } = useAuth();
 const { showToast } = useToast();
 
 const emit = defineEmits(['view-request']);
+
+// Format plate number with code
+const formatPlateNumber = (number, code) => {
+  if (!number) return 'N/A';
+  try {
+    const num = String(number).trim();
+    if (!num) return 'N/A';
+    const cod = code ? String(code).trim().toUpperCase() : '';
+    return cod ? `${num} ${cod}` : num;
+  } catch (e) {
+    console.error('Error formatting plate number:', e);
+    return 'N/A';
+  }
+};
 
 // Employees
 const employees = ref([]);
@@ -345,6 +377,7 @@ const isLoadingVehicles = ref(false);
 const newVehicleForm = ref({
   name: '',
   plateNumber: '',
+  plateCode: '',
   type: ''
 });
 const isCreatingVehicle = ref(false);
@@ -358,16 +391,18 @@ const scheduleDateTo = ref(new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISO
 const loadEmployees = async () => {
   isLoadingEmployees.value = true;
   try {
-    const res = await fetch(`${apiBase}/admin/employees`, {
-      headers: getAuthHeaders()
-    });
+    const res = await authenticatedFetch(`${apiBase}/admin/employees`);
     if (!res.ok) {
       const data = await res.json();
       throw new Error(data.error || 'Failed to load employees');
     }
     employees.value = await res.json();
   } catch (e) {
-    showToast(e.message, 'error');
+    if (e.message.includes('Session expired')) {
+      showToast('Your session has expired. Please log in again.', 'error', 8000);
+    } else {
+      showToast(e.message, 'error');
+    }
     employees.value = [];
   } finally {
     isLoadingEmployees.value = false;
@@ -376,9 +411,8 @@ const loadEmployees = async () => {
 
 const activateEmployee = async (employeeId) => {
   try {
-    const res = await fetch(`${apiBase}/admin/employees/${employeeId}/activate`, {
-      method: 'PATCH',
-      headers: getAuthHeaders()
+    const res = await authenticatedFetch(`${apiBase}/admin/employees/${employeeId}/activate`, {
+      method: 'PATCH'
     });
     if (!res.ok) {
       const data = await res.json();
@@ -387,7 +421,11 @@ const activateEmployee = async (employeeId) => {
     showToast('Employee activated successfully', 'success');
     await loadEmployees();
   } catch (e) {
-    showToast(e.message, 'error');
+    if (e.message.includes('Session expired')) {
+      showToast('Your session has expired. Please log in again.', 'error', 8000);
+    } else {
+      showToast(e.message, 'error');
+    }
   }
 };
 
@@ -405,16 +443,10 @@ const cancelEditEmployee = () => {
 
 const saveEmployee = async (employeeId) => {
   try {
-    const res = await fetch(`${apiBase}/admin/employees/${employeeId}`, {
+    const res = await authenticatedFetch(`${apiBase}/admin/employees/${employeeId}`, {
       method: 'PATCH',
-      headers: getAuthHeaders(),
       body: JSON.stringify(employeeEditForm.value)
     });
-    if (res.status === 401) {
-      clearAuth();
-      showToast('Your session has expired. Please log in again.', 'error', 8000);
-      return;
-    }
     if (!res.ok) {
       const data = await res.json();
       throw new Error(data.error || 'Failed to update employee');
@@ -423,7 +455,11 @@ const saveEmployee = async (employeeId) => {
     editingEmployee.value = null;
     await loadEmployees();
   } catch (e) {
-    showToast(e.message, 'error');
+    if (e.message.includes('Session expired')) {
+      showToast('Your session has expired. Please log in again.', 'error', 8000);
+    } else {
+      showToast(e.message, 'error');
+    }
   }
 };
 
@@ -435,16 +471,10 @@ const createEmployee = async () => {
   
   isCreatingEmployee.value = true;
   try {
-    const res = await fetch(`${apiBase}/admin/employees`, {
+    const res = await authenticatedFetch(`${apiBase}/admin/employees`, {
       method: 'POST',
-      headers: getAuthHeaders(),
       body: JSON.stringify(newEmployeeForm.value)
     });
-    if (res.status === 401) {
-      clearAuth();
-      showToast('Your session has expired. Please log in again.', 'error', 8000);
-      return;
-    }
     if (!res.ok) {
       const data = await res.json();
       throw new Error(data.error || 'Failed to create employee');
@@ -460,7 +490,11 @@ const createEmployee = async () => {
     };
     await loadEmployees();
   } catch (e) {
-    showToast(e.message, 'error');
+    if (e.message.includes('Session expired')) {
+      showToast('Your session has expired. Please log in again.', 'error', 8000);
+    } else {
+      showToast(e.message, 'error');
+    }
   } finally {
     isCreatingEmployee.value = false;
   }
@@ -469,16 +503,18 @@ const createEmployee = async () => {
 const loadVehicles = async () => {
   isLoadingVehicles.value = true;
   try {
-    const res = await fetch(`${apiBase}/admin/vehicles`, {
-      headers: getAuthHeaders()
-    });
+    const res = await authenticatedFetch(`${apiBase}/admin/vehicles`);
     if (!res.ok) {
       const data = await res.json();
       throw new Error(data.error || 'Failed to load vehicles');
     }
     vehicles.value = await res.json();
   } catch (e) {
-    showToast(e.message, 'error');
+    if (e.message.includes('Session expired')) {
+      showToast('Your session has expired. Please log in again.', 'error', 8000);
+    } else {
+      showToast(e.message, 'error');
+    }
     vehicles.value = [];
   } finally {
     isLoadingVehicles.value = false;
@@ -488,9 +524,8 @@ const loadVehicles = async () => {
 const toggleVehicleStatus = async (vehicleId, currentStatus) => {
   try {
     const newStatus = currentStatus === 'ACTIVE' ? 'INACTIVE' : 'ACTIVE';
-    const res = await fetch(`${apiBase}/admin/vehicles/${vehicleId}/status`, {
+    const res = await authenticatedFetch(`${apiBase}/admin/vehicles/${vehicleId}/status`, {
       method: 'PATCH',
-      headers: getAuthHeaders(),
       body: JSON.stringify({ status: newStatus })
     });
     if (!res.ok) {
@@ -500,7 +535,11 @@ const toggleVehicleStatus = async (vehicleId, currentStatus) => {
     showToast(`Vehicle status updated to ${newStatus}`, 'success');
     await loadVehicles();
   } catch (e) {
-    showToast(e.message, 'error');
+    if (e.message.includes('Session expired')) {
+      showToast('Your session has expired. Please log in again.', 'error', 8000);
+    } else {
+      showToast(e.message, 'error');
+    }
   }
 };
 
@@ -510,23 +549,23 @@ const createVehicle = async () => {
     return;
   }
   
+  // Validate plate code format (optional, but if provided should be 2-5 uppercase letters)
+  if (newVehicleForm.value.plateCode && !/^[A-Z]{2,5}$/i.test(newVehicleForm.value.plateCode)) {
+    showToast('Plate code must be 2-5 letters', 'error');
+    return;
+  }
+  
   isCreatingVehicle.value = true;
   try {
-    const res = await fetch(`${apiBase}/admin/vehicles`, {
+    const res = await authenticatedFetch(`${apiBase}/admin/vehicles`, {
       method: 'POST',
-      headers: getAuthHeaders(),
       body: JSON.stringify({
         name: newVehicleForm.value.name,
-        plate_number: newVehicleForm.value.plateNumber,
+        plateNumber: newVehicleForm.value.plateNumber,
+        plateCode: (newVehicleForm.value.plateCode || '').toUpperCase().trim(),
         type: newVehicleForm.value.type || null
       })
     });
-    
-    if (res.status === 401) {
-      clearAuth();
-      showToast('Your session has expired. Please log in again.', 'error', 8000);
-      return;
-    }
     
     if (!res.ok) {
       const data = await res.json();
@@ -534,7 +573,7 @@ const createVehicle = async () => {
     }
     
     showToast('Vehicle added successfully', 'success');
-    newVehicleForm.value = { name: '', plateNumber: '', type: '' };
+    newVehicleForm.value = { name: '', plateNumber: '', plateCode: '', type: '' };
     await loadVehicles();
   } catch (e) {
     showToast(e.message, 'error');
@@ -552,14 +591,7 @@ const loadFleetSchedule = async () => {
     if (scheduleDateFrom.value) params.append('from', scheduleDateFrom.value);
     if (scheduleDateTo.value) params.append('to', scheduleDateTo.value);
     
-    const res = await fetch(`${apiBase}/fleet/schedule?${params.toString()}`, {
-      headers: getAuthHeaders()
-    });
-    if (res.status === 401) {
-      clearAuth();
-      showToast('Your session has expired. Please log in again.', 'error', 8000);
-      return;
-    }
+    const res = await authenticatedFetch(`${apiBase}/fleet/schedule?${params.toString()}`);
     if (!res.ok) {
       const data = await res.json();
       throw new Error(data.error || 'Failed to load fleet schedule');

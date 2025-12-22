@@ -41,6 +41,25 @@
         <span v-if="errors.selectedDate" class="error-message">{{ errors.selectedDate }}</span>
       </div>
       <div class="input-group full-width">
+        <label>Vehicle Selection</label>
+        <div class="select-wrapper">
+          <select v-model="form.vehicleId" :disabled="isLoadingVehicles || !selectedDate" @change="loadAvailableSlots">
+            <option value="">Auto-assign (First Available)</option>
+            <option 
+              v-for="vehicle in vehicles" 
+              :key="vehicle.id" 
+              :value="vehicle.id"
+            >
+              {{ vehicle.name }} ({{ formatPlateNumber(vehicle.plate_number, vehicle.plate_code) }})
+            </option>
+          </select>
+        </div>
+        <span v-if="isLoadingVehicles" class="text-muted" style="font-size: 0.85rem;">Loading vehicles...</span>
+        <small class="text-muted" style="display: block; margin-top: 0.5rem; font-size: 0.85rem;">
+          Select a vehicle to see its availability, or choose "Auto-assign" to see all available time slots
+        </small>
+      </div>
+      <div class="input-group full-width">
         <label>Available Time Slots <span class="required">*</span></label>
         <div v-if="selectedDate && availableSlots.length" class="time-slots-grid">
           <button
@@ -61,8 +80,11 @@
         <div v-else-if="selectedDate && isLoadingSlots" class="text-muted" style="padding: 1rem; text-align: center;">
           Loading available slots...
         </div>
+        <div v-else-if="selectedDate && !isLoadingSlots && !form.vehicleId" class="text-muted" style="padding: 1rem; text-align: center;">
+          Select a vehicle or choose "Auto-assign" to view available time slots
+        </div>
         <div v-else-if="selectedDate && !isLoadingSlots" class="text-muted" style="padding: 1rem; text-align: center;">
-          Please select a date to view available time slots
+          No available time slots for the selected vehicle on this date
         </div>
         <div v-else class="text-muted" style="padding: 1rem; text-align: center;">
           Select a date to see available time slots
@@ -97,22 +119,6 @@
         <label>Passengers</label>
         <input v-model.number="form.passengers" type="number" min="1" />
       </div>
-      <div class="input-group">
-        <label>Vehicle Selection</label>
-        <div class="select-wrapper">
-          <select v-model="form.vehicleId" :disabled="isLoadingVehicles">
-            <option value="">Auto-assign (First Available)</option>
-            <option 
-              v-for="vehicle in vehicles" 
-              :key="vehicle.id" 
-              :value="vehicle.id"
-            >
-              {{ vehicle.name }} ({{ vehicle.plate_number }})
-            </option>
-          </select>
-        </div>
-        <span v-if="isLoadingVehicles" class="text-muted" style="font-size: 0.85rem;">Loading vehicles...</span>
-      </div>
     </div>
 
     <div class="actions">
@@ -130,10 +136,24 @@ import { useAuth } from '../composables/useAuth';
 import { useToast } from '../composables/useToast';
 
 const apiBase = 'http://localhost:4000/api';
-const { currentUser, getAuthHeaders, clearAuth } = useAuth();
+const { currentUser, authenticatedFetch } = useAuth();
 const { showToast } = useToast();
 
 const emit = defineEmits(['submitted']);
+
+// Format plate number with code
+const formatPlateNumber = (number, code) => {
+  if (!number) return 'N/A';
+  try {
+    const num = String(number).trim();
+    if (!num) return 'N/A';
+    const cod = code ? String(code).trim().toUpperCase() : '';
+    return cod ? `${num} ${cod}` : num;
+  } catch (e) {
+    console.error('Error formatting plate number:', e);
+    return 'N/A';
+  }
+};
 
 const vehicles = ref([]);
 const isLoadingVehicles = ref(false);
@@ -167,13 +187,15 @@ const fillFormWithUserInfo = () => {
 const loadVehicles = async () => {
   isLoadingVehicles.value = true;
   try {
-    const res = await fetch(`${apiBase}/vehicles`, {
-      headers: getAuthHeaders()
-    });
+    const res = await authenticatedFetch(`${apiBase}/vehicles`);
     if (!res.ok) throw new Error('Failed to load vehicles');
     vehicles.value = await res.json();
   } catch (e) {
-    console.error('Error loading vehicles:', e);
+    if (e.message.includes('Session expired')) {
+      showToast('Your session has expired. Please log in again.', 'error', 8000);
+    } else {
+      console.error('Error loading vehicles:', e);
+    }
     vehicles.value = [];
   } finally {
     isLoadingVehicles.value = false;
@@ -189,19 +211,12 @@ const loadAvailableSlots = async () => {
   isLoadingSlots.value = true;
   try {
     const params = new URLSearchParams({ date: selectedDate.value });
+    // Only add vehicleId if a specific vehicle is selected (not auto-assign)
     if (form.value.vehicleId) {
       params.append('vehicleId', form.value.vehicleId);
     }
     
-    const res = await fetch(`${apiBase}/car-bookings/available-slots?${params.toString()}`, {
-      headers: getAuthHeaders()
-    });
-    
-    if (res.status === 401) {
-      clearAuth();
-      showToast('Your session has expired. Please log in again.', 'error', 8000);
-      return;
-    }
+    const res = await authenticatedFetch(`${apiBase}/car-bookings/available-slots?${params.toString()}`);
     
     if (!res.ok) {
       const data = await res.json();
@@ -211,13 +226,17 @@ const loadAvailableSlots = async () => {
     const data = await res.json();
     availableSlots.value = data.slots || [];
     
-    // Clear selected slots when date changes
+    // Clear selected slots when date or vehicle changes
     selectedStartSlot.value = null;
     selectedEndSlot.value = null;
     form.value.startDatetime = '';
     form.value.endDatetime = '';
   } catch (e) {
-    showToast(e.message, 'error');
+    if (e.message.includes('Session expired')) {
+      showToast('Your session has expired. Please log in again.', 'error', 8000);
+    } else {
+      showToast(e.message, 'error');
+    }
     availableSlots.value = [];
   } finally {
     isLoadingSlots.value = false;
@@ -315,16 +334,10 @@ const handleSubmit = async () => {
       vehicleId: form.value.vehicleId || null
     };
     
-    const res = await fetch(`${apiBase}/car-bookings`, {
+    const res = await authenticatedFetch(`${apiBase}/car-bookings`, {
       method: 'POST',
-      headers: getAuthHeaders(),
       body: JSON.stringify(payload)
     });
-    if (res.status === 401) {
-      clearAuth();
-      showToast('Your session has expired. Please log in again.', 'error', 8000);
-      return;
-    }
     const data = await res.json();
     if (!res.ok) {
       const errorMsg = data.error || 'Failed to book car';
@@ -343,7 +356,8 @@ const handleSubmit = async () => {
     form.value.reason = '';
     form.value.destination = '';
     form.value.passengers = '';
-    form.value.vehicleId = '';
+    form.value.vehicleId = ''; // Reset to auto-assign
+    availableSlots.value = []; // Clear slots
     availableSlots.value = [];
     
     emit('submitted');

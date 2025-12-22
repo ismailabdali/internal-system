@@ -73,7 +73,12 @@
               <div class="detail-section-title">Booking Information</div>
               <div class="detail-row">
                 <span class="detail-label">Vehicle:</span>
-                <span>{{ request.carBooking.vehicle?.name || 'N/A' }}</span>
+                <span>
+                  {{ request.carBooking.vehicle?.name || 'N/A' }}
+                  <span v-if="request.carBooking.vehicle?.plateNumber" style="margin-left: 0.5rem; color: var(--shc-text-secondary); font-size: 0.9em;">
+                    ({{ formatPlateNumber(request.carBooking.vehicle.plateNumber, request.carBooking.vehicle.plateCode) }})
+                  </span>
+                </span>
               </div>
               <div class="detail-row">
                 <span class="detail-label">Start:</span>
@@ -90,6 +95,30 @@
               <div class="detail-row">
                 <span class="detail-label">Passengers:</span>
                 <span>{{ request.carBooking.passengers || 'N/A' }}</span>
+              </div>
+              <!-- Cancel Booking Button for Fleet Admin and Employees -->
+              <div v-if="canCancelBooking(request)" class="booking-actions" style="margin-top: 1.5rem; padding-top: 1.5rem; border-top: 1px solid var(--shc-bg-warm);">
+                <div style="margin-bottom: 1rem;">
+                  <label style="display: block; margin-bottom: 0.5rem; font-weight: 500; color: var(--shc-text-primary);">
+                    Cancellation Reason <span style="color: var(--shc-magenta);">*</span>
+                  </label>
+                  <textarea
+                    v-model="cancelReason"
+                    placeholder="Please provide a reason for cancelling this booking..."
+                    rows="3"
+                    style="width: 100%; padding: 0.75rem; border: 1px solid var(--shc-bg-warm); border-radius: 8px; font-family: inherit; font-size: 0.9rem; resize: vertical;"
+                    :disabled="updatingStatus"
+                  ></textarea>
+                </div>
+                <button 
+                  class="btn-secondary" 
+                  @click="handleCancelBooking"
+                  :disabled="updatingStatus || !cancelReason || !cancelReason.trim()"
+                  style="background: #ffebee; color: var(--shc-magenta); border-color: var(--shc-magenta);"
+                >
+                  <span v-if="updatingStatus" class="spinner-small"></span>
+                  {{ updatingStatus ? 'Cancelling...' : 'Cancel Booking' }}
+                </button>
               </div>
             </template>
 
@@ -170,7 +199,7 @@
 </template>
 
 <script setup>
-import { ref } from 'vue';
+import { ref, watch } from 'vue';
 import { useAuth } from '../composables/useAuth';
 import { useToast } from '../composables/useToast';
 
@@ -182,11 +211,26 @@ const props = defineProps({
 
 const emit = defineEmits(['close', 'status-update', 'add-note']);
 
-const { canUpdateRequest, canAddNotes, canViewEmployeeId } = useAuth();
+const { canUpdateRequest, canCancelBooking, canAddNotes, canViewEmployeeId } = useAuth();
 const { showToast } = useToast();
 
 const noteText = ref('');
 const addingNote = ref(false);
+const cancelReason = ref('');
+
+// Format plate number with code
+const formatPlateNumber = (number, code) => {
+  if (!number) return 'N/A';
+  try {
+    const num = String(number).trim();
+    if (!num) return 'N/A';
+    const cod = code ? String(code).trim().toUpperCase() : '';
+    return cod ? `${num} ${cod}` : num;
+  } catch (e) {
+    console.error('Error formatting plate number:', e);
+    return 'N/A';
+  }
+};
 
 // Safe date formatter
 const formatDate = (dateString) => {
@@ -231,6 +275,35 @@ const handleStatusUpdate = (newStatus) => {
   emit('status-update', props.request.id, newStatus, noteText.value || undefined);
   noteText.value = ''; // Clear note after status update
 };
+
+const handleCancelBooking = () => {
+  if (!cancelReason.value || !cancelReason.value.trim()) {
+    showToast('Please provide a cancellation reason', 'error');
+    return;
+  }
+  
+  if (confirm('Are you sure you want to cancel this booking? This action cannot be undone.')) {
+    emit('status-update', props.request.id, 'CANCELLED', cancelReason.value.trim());
+    // Don't clear cancelReason here - let it clear after successful update
+  }
+};
+
+// Clear cancel reason when request changes, modal closes, or status updates
+watch(() => props.request?.id, () => {
+  cancelReason.value = '';
+});
+
+watch(() => props.request?.status, (newStatus) => {
+  if (newStatus === 'CANCELLED') {
+    cancelReason.value = '';
+  }
+});
+
+watch(() => props.show, (isOpen) => {
+  if (!isOpen) {
+    cancelReason.value = '';
+  }
+});
 
 const addNote = async () => {
   if (!noteText.value.trim()) return;
