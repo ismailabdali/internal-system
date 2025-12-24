@@ -1,6 +1,9 @@
 import { ref, computed } from 'vue';
 
-const apiBase = 'http://localhost:4000/api';
+import { API_BASE } from '../config';
+
+const apiBase = API_BASE;
+
 
 // Shared auth state
 const isLoggedIn = ref(false);
