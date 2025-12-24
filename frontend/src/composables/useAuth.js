@@ -28,16 +28,38 @@ export function useAuth() {
   // Check if user can update a specific request
   const canUpdateRequest = (request) => {
     if (!request) return false;
+    if (!currentUser.value) return false;
+    
+    const userRole = currentUser.value.role;
+    
     // SUPER_ADMIN can update any request
     if (isSuperAdmin.value) return true;
-    // IT_ADMIN can update IT requests and ONBOARDING requests in IT_SETUP step
+    
+    // IT_ADMIN can update IT requests and ONBOARDING parent requests
     if (isITAdmin.value && request.type === 'IT') return true;
-    if (isITAdmin.value && request.type === 'ONBOARDING' && (request.currentStep === 'IT_SETUP' || request.workflowStatus === 'IT_SETUP')) return true;
-    // HR_ADMIN can update ONBOARDING requests and IT requests
-    if (isHRAdmin.value && request.type === 'ONBOARDING') return true;
-    if (isHRAdmin.value && request.type === 'IT') return true;
+    if (isITAdmin.value && request.type === 'ONBOARDING' && !request.parentRequestId) return true;
+    
+    // HR_ADMIN can VIEW but NOT EDIT onboarding or IT requests
+    // (removed update permissions for HR)
+    
+    // System admins and devices admin can update requests assigned to their role
+    if (userRole.startsWith('IT_') && userRole !== 'IT_ADMIN') {
+      // System admin or devices admin
+      if (request.assignedRole === userRole) {
+        return true; // Can update requests assigned to their role
+      }
+    }
+    
+    // Child onboarding requests: only assigned role can update
+    if ((request.type === 'ONBOARDING_EMAIL' || request.type === 'ONBOARDING_DEVICE' || request.type === 'ONBOARDING_SYSTEM')) {
+      if (request.assignedRole === userRole) {
+        return true;
+      }
+    }
+    
     // FLEET_ADMIN can update CAR_BOOKING requests
     if (isFleetAdmin.value && request.type === 'CAR_BOOKING') return true;
+    
     return false;
   };
   
@@ -58,9 +80,31 @@ export function useAuth() {
   // Check if user can add notes to a request
   const canAddNotes = (request) => {
     if (!request) return false;
+    if (!currentUser.value) return false;
+    
     if (isSuperAdmin.value) return true;
-    if (isITAdmin.value && (request.type === 'IT' || (request.type === 'ONBOARDING' && (request.currentStep === 'IT_SETUP' || request.workflowStatus === 'IT_SETUP')))) return true;
-    if (isHRAdmin.value && (request.type === 'ONBOARDING' || request.type === 'IT')) return true;
+    
+    const userRole = currentUser.value.role;
+    
+    // IT_ADMIN can add notes to IT and onboarding requests
+    if (isITAdmin.value && (request.type === 'IT' || request.type === 'ONBOARDING')) return true;
+    
+    // HR_ADMIN can view but not add notes (read-only)
+    
+    // System admins and devices admin can add notes to their assigned requests
+    if (userRole.startsWith('IT_') && userRole !== 'IT_ADMIN') {
+      if (request.assignedRole === userRole) {
+        return true;
+      }
+    }
+    
+    // Child onboarding requests: assigned role can add notes
+    if ((request.type === 'ONBOARDING_EMAIL' || request.type === 'ONBOARDING_DEVICE' || request.type === 'ONBOARDING_SYSTEM')) {
+      if (request.assignedRole === userRole) {
+        return true;
+      }
+    }
+    
     if (isFleetAdmin.value && request.type === 'CAR_BOOKING') return true;
     return false;
   };

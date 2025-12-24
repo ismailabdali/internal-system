@@ -178,17 +178,89 @@
                 <span class="detail-label">Start Date:</span>
                 <span>{{ formatDateOnly(request.onboarding.startDate) }}</span>
               </div>
-              <div class="detail-row">
-                <span class="detail-label">Device:</span>
+              <div v-if="request.onboarding.emailNeeded !== undefined" class="detail-row">
+                <span class="detail-label">Email Needed:</span>
+                <span>{{ request.onboarding.emailNeeded ? 'Yes' : 'No' }}</span>
+              </div>
+              <div v-if="request.onboarding.deviceNeeded !== undefined" class="detail-row">
+                <span class="detail-label">Device Needed:</span>
+                <span>{{ request.onboarding.deviceNeeded ? 'Yes' : 'No' }}</span>
+              </div>
+              <div v-if="request.onboarding.deviceType" class="detail-row">
+                <span class="detail-label">Device Type:</span>
                 <span>{{ request.onboarding.deviceType }}</span>
               </div>
               <div class="detail-row">
                 <span class="detail-label">VPN Required:</span>
                 <span>{{ request.onboarding.vpnRequired ? 'Yes' : 'No' }}</span>
               </div>
+              <div v-if="request.onboarding.systemsRequested && request.onboarding.systemsRequested.length > 0" class="detail-row full-width">
+                <span class="detail-label">Systems Requested:</span>
+                <div style="margin-top: 0.5rem;">
+                  <span v-for="sys in request.onboarding.systemsRequested" :key="sys" 
+                        class="type-pill" style="margin-right: 0.5rem; margin-bottom: 0.5rem; display: inline-block;">
+                    {{ getSystemName(sys) }}
+                  </span>
+                </div>
+              </div>
               <div v-if="request.onboarding.notes" class="detail-row full-width">
                 <span class="detail-label">Notes:</span>
                 <p class="detail-description">{{ request.onboarding.notes }}</p>
+              </div>
+              
+              <!-- Child Requests -->
+              <div v-if="request.children && request.children.length > 0" class="detail-section-title" style="margin-top: 2rem;">
+                Child Requests ({{ request.children.length }})
+              </div>
+              <div v-for="child in request.children" :key="child.id" 
+                   class="child-request-card" 
+                   style="background: #f8f9fa; padding: 1rem; border-radius: 8px; margin-bottom: 0.75rem; border-left: 3px solid var(--shc-deep-green);">
+                <div style="display: flex; justify-content: space-between; align-items: start;">
+                  <div style="flex: 1;">
+                    <div style="font-weight: 600; margin-bottom: 0.5rem;">{{ child.title }}</div>
+                    <div style="font-size: 0.85rem; color: var(--shc-text-secondary); margin-bottom: 0.5rem;">
+                      Type: <span class="type-pill" style="font-size: 0.8rem;">{{ child.type }}</span>
+                      <span v-if="child.systemKey" style="margin-left: 0.75rem;">
+                        System: <strong>{{ getSystemName(child.systemKey) }}</strong>
+                      </span>
+                    </div>
+                    <div style="font-size: 0.85rem; color: var(--shc-text-secondary);">
+                      Assigned to: <strong>{{ child.assignedRole || 'N/A' }}</strong>
+                    </div>
+                  </div>
+                  <div style="text-align: right;">
+                    <span class="status-indicator" :data-status="child.status">{{ formatStatus(child.status) }}</span>
+                    <div v-if="canUpdateChildRequest(child)" style="margin-top: 0.5rem;">
+                      <select 
+                        :value="child.status" 
+                        @change="handleChildStatusUpdate(child.id, $event.target.value)"
+                        :disabled="updatingStatus"
+                        style="font-size: 0.85rem; padding: 0.25rem 0.5rem;"
+                      >
+                        <option value="PENDING">Pending</option>
+                        <option value="IN_PROGRESS">In Progress</option>
+                        <option value="COMPLETED">Completed</option>
+                      </select>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </template>
+            
+            <!-- Child Request Details (when viewing a child) -->
+            <template v-if="(request.type === 'ONBOARDING_EMAIL' || request.type === 'ONBOARDING_DEVICE' || request.type === 'ONBOARDING_SYSTEM') && request.parent">
+              <div class="detail-section-title">Parent Request</div>
+              <div class="detail-row">
+                <span class="detail-label">Parent ID:</span>
+                <span class="font-mono">#{{ request.parent.id }}</span>
+              </div>
+              <div class="detail-row">
+                <span class="detail-label">Parent Title:</span>
+                <span>{{ request.parent.title }}</span>
+              </div>
+              <div class="detail-row">
+                <span class="detail-label">Parent Status:</span>
+                <span class="status-indicator" :data-status="request.parent.status">{{ formatStatus(request.parent.status) }}</span>
               </div>
             </template>
             
@@ -234,7 +306,7 @@ const props = defineProps({
 
 const emit = defineEmits(['close', 'status-update', 'add-note']);
 
-const { canUpdateRequest, canCancelBooking, canAddNotes, canViewEmployeeId } = useAuth();
+const { canUpdateRequest, canCancelBooking, canAddNotes, canViewEmployeeId, currentUser } = useAuth();
 const { showToast } = useToast();
 const { formatStatus } = useStatusFormatter();
 
@@ -254,6 +326,32 @@ const formatPlateNumber = (number, code) => {
     console.error('Error formatting plate number:', e);
     return 'N/A';
   }
+};
+
+// Helper to get system name from key
+const getSystemName = (systemKey) => {
+  const systems = {
+    'M365': 'Microsoft 365',
+    'POWER_BI': 'Power BI Pro',
+    'ACONEX': 'Aconex',
+    'AUTODESK': 'Autodesk',
+    'P6': 'Primavera P6',
+    'RISK': 'RiskHive'
+  };
+  return systems[systemKey] || systemKey;
+};
+
+// Check if user can update a child request
+const canUpdateChildRequest = (child) => {
+  if (!currentUser.value) return false;
+  const role = currentUser.value.role;
+  // User can update if they are the assigned role for that child
+  return role === child.assignedRole || role === 'IT_ADMIN' || role === 'SUPER_ADMIN';
+};
+
+// Handle child status update
+const handleChildStatusUpdate = (childId, newStatus) => {
+  emit('status-update', childId, newStatus, '');
 };
 
 // Safe date formatter

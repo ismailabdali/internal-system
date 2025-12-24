@@ -15,8 +15,8 @@
     
     <div v-if="isHRAdmin || isSuperAdmin" class="info-banner" style="background: #e8f4f0; border-left: 4px solid var(--shc-deep-green); padding: 1.25rem 1.5rem; border-radius: 8px; margin-bottom: 2rem;">
       <p style="margin: 0; font-size: 0.9rem; color: var(--shc-deep-green); line-height: 1.6;">
-        <strong>💡 Automatic IT Request:</strong> When you submit an onboarding request with a device selected, 
-        an IT request will be automatically created for device setup and configuration.
+        <strong>💡 Child Requests:</strong> When you submit an onboarding request, child requests will be automatically created for:
+        email setup, device setup (if selected), and system access (for each selected system). Each child request will be assigned to the appropriate IT admin.
       </p>
     </div>
     
@@ -81,31 +81,63 @@
         <label>Location</label>
         <input v-model="form.location" type="text" placeholder="e.g. Main Office" />
       </div>
-      <div class="input-group">
-        <label>
-          Primary Device 
-          <span class="info-badge" style="font-size: 0.7rem; font-weight: normal; color: var(--shc-text-secondary); text-transform: none; letter-spacing: 0; margin-left: 0.5rem;">(Auto-creates IT request)</span>
-        </label>
-        <div class="select-wrapper">
-          <select v-model="form.deviceType">
-            <option value="">No device needed</option>
-            <option>Business Laptop</option>
-            <option>Engineer Laptop</option>
-            <option>MacBook Pro</option>
-            <option>Desktop Computer</option>
-            <option>Tablet</option>
-          </select>
+      <div class="input-group full-width" style="background: #f8f9fa; padding: 1.5rem; border-radius: 8px; margin: 1rem 0;">
+        <h3 style="margin: 0 0 1rem 0; font-size: 1.1rem; color: var(--shc-deep-green);">IT Requirements</h3>
+        
+        <div class="checkbox-group" style="margin-bottom: 1rem;">
+          <label class="checkbox-container">
+            <input v-model="form.emailNeeded" type="checkbox" />
+            <span class="checkmark"></span>
+            <strong>Email Account Setup</strong>
+            <span style="font-size: 0.85rem; color: var(--shc-text-secondary); display: block; margin-top: 0.25rem;">
+              Creates email account for new employee
+            </span>
+          </label>
         </div>
-        <span v-if="form.deviceType" class="text-muted" style="font-size: 0.85rem; margin-top: 0.5rem; display: block; line-height: 1.5; color: var(--shc-deep-green); font-weight: 500;">
-          ✓ IT request will be auto-created when onboarding is completed
-        </span>
-      </div>
-      <div class="input-group checkbox-group">
-        <label class="checkbox-container">
-          <input v-model="form.vpnRequired" type="checkbox" />
-          <span class="checkmark"></span>
-          VPN Access Required
-        </label>
+        
+        <div class="checkbox-group" style="margin-bottom: 1rem;">
+          <label class="checkbox-container">
+            <input v-model="form.deviceNeeded" type="checkbox" />
+            <span class="checkmark"></span>
+            <strong>Device Setup</strong>
+            <span style="font-size: 0.85rem; color: var(--shc-text-secondary); display: block; margin-top: 0.25rem;">
+              Creates device setup request
+            </span>
+          </label>
+        </div>
+        
+        <div v-if="form.deviceNeeded" class="input-group" style="margin-top: 1rem; margin-bottom: 0;">
+          <label>Device Type</label>
+          <div class="select-wrapper">
+            <select v-model="form.deviceType">
+              <option value="">Select device type</option>
+              <option>Business Laptop</option>
+              <option>Engineer Laptop</option>
+              <option>MacBook Pro</option>
+              <option>Desktop Computer</option>
+              <option>Tablet</option>
+            </select>
+          </div>
+        </div>
+        
+        <div class="input-group full-width" style="margin-top: 1.5rem; margin-bottom: 0;">
+          <label>System Access Required <span class="text-muted" style="font-size: 0.85rem; font-weight: normal;">(Select all that apply)</span></label>
+          <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 0.75rem; margin-top: 0.5rem;">
+            <label class="checkbox-container" v-for="system in availableSystems" :key="system.key" style="padding: 0.75rem; background: white; border-radius: 6px; border: 1px solid var(--shc-border);">
+              <input type="checkbox" :value="system.key" v-model="form.systemsRequested" />
+              <span class="checkmark"></span>
+              <span style="margin-left: 1.5rem;">{{ system.name }}</span>
+            </label>
+          </div>
+        </div>
+        
+        <div class="checkbox-group" style="margin-top: 1rem;">
+          <label class="checkbox-container">
+            <input v-model="form.vpnRequired" type="checkbox" />
+            <span class="checkmark"></span>
+            VPN Access Required
+          </label>
+        </div>
       </div>
       <div class="input-group full-width">
         <label>Additional Notes</label>
@@ -142,10 +174,23 @@ const form = ref({
   startDate: '',
   deviceType: '',
   vpnRequired: false,
-  notes: ''
+  notes: '',
+  // New fields for child requests
+  emailNeeded: true, // Default to true
+  deviceNeeded: false,
+  systemsRequested: [] // Array of system keys
 });
 const errors = ref({});
 const isSubmitting = ref(false);
+
+const availableSystems = [
+  { key: 'M365', name: 'Microsoft 365' },
+  { key: 'POWER_BI', name: 'Power BI Pro' },
+  { key: 'ACONEX', name: 'Aconex' },
+  { key: 'AUTODESK', name: 'Autodesk' },
+  { key: 'P6', name: 'Primavera P6' },
+  { key: 'RISK', name: 'RiskHive' }
+];
 
 // Auto-fill form with user info
 const fillFormWithUserInfo = () => {
@@ -215,6 +260,9 @@ const handleSubmit = async () => {
     form.value.deviceType = '';
     form.value.vpnRequired = false;
     form.value.notes = '';
+    form.value.emailNeeded = true;
+    form.value.deviceNeeded = false;
+    form.value.systemsRequested = [];
     
     emit('submitted');
   } catch (e) {

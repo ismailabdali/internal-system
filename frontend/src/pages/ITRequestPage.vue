@@ -51,13 +51,30 @@
       <div class="input-group">
         <label>Category</label>
         <div class="select-wrapper">
-          <select v-model="form.category">
+          <select v-model="form.category" @change="handleCategoryChange">
             <option>Support / Incident</option>
             <option>Devices & Materials</option>
             <option>Access & Permissions</option>
             <option>Software / License</option>
           </select>
         </div>
+      </div>
+      <div class="input-group" v-if="showSystemDropdown">
+        <label>System <span class="text-muted" style="font-size: 0.85rem; font-weight: normal;">(Optional)</span></label>
+        <div class="select-wrapper">
+          <select v-model="form.systemKey">
+            <option value="">No specific system</option>
+            <option value="M365">Microsoft 365</option>
+            <option value="POWER_BI">Power BI Pro</option>
+            <option value="ACONEX">Aconex</option>
+            <option value="AUTODESK">Autodesk</option>
+            <option value="P6">Primavera P6</option>
+            <option value="RISK">RiskHive</option>
+          </select>
+        </div>
+        <span v-if="form.systemKey" class="text-muted" style="font-size: 0.85rem; margin-top: 0.5rem; display: block;">
+          Request will be routed to {{ getSystemAdminRole(form.systemKey) }} admin
+        </span>
       </div>
       <div class="input-group">
         <label>Urgency Level</label>
@@ -81,7 +98,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, watch } from 'vue';
+import { ref, computed, onMounted, watch } from 'vue';
 import { useAuth } from '../composables/useAuth';
 import { useToast } from '../composables/useToast';
 
@@ -98,12 +115,36 @@ const form = ref({
   description: '',
   category: 'Support / Incident',
   systemName: '',
+  systemKey: '', // New: system key for routing
   impact: 'Medium',
   urgency: 'Normal',
   assetTag: ''
 });
 const errors = ref({});
 const isSubmitting = ref(false);
+
+const showSystemDropdown = computed(() => {
+  return form.value.category === 'Access & Permissions' || form.value.category === 'Software / License';
+});
+
+const getSystemAdminRole = (systemKey) => {
+  const roles = {
+    'M365': 'M365',
+    'POWER_BI': 'BI',
+    'ACONEX': 'Aconex',
+    'AUTODESK': 'Autodesk',
+    'P6': 'P6',
+    'RISK': 'Risk'
+  };
+  return roles[systemKey] || 'IT';
+};
+
+const handleCategoryChange = () => {
+  // Clear system selection if category doesn't support it
+  if (!showSystemDropdown.value) {
+    form.value.systemKey = '';
+  }
+};
 
 // Auto-fill form with user info
 const fillFormWithUserInfo = () => {
@@ -160,6 +201,7 @@ const handleSubmit = async () => {
     form.value.title = '';
     form.value.description = '';
     form.value.systemName = '';
+    form.value.systemKey = '';
     form.value.assetTag = '';
     
     emit('submitted');

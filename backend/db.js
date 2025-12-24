@@ -283,7 +283,10 @@ function initializeTables() {
         { name: 'assigned_role', definition: 'TEXT' },
         { name: 'assigned_to_employee_id', definition: 'INTEGER' },
         { name: 'workflow_status', definition: 'TEXT DEFAULT "SUBMITTED"' },
-        { name: 'current_step', definition: 'TEXT' }
+        { name: 'current_step', definition: 'TEXT' },
+        { name: 'parent_request_id', definition: 'INTEGER' },
+        { name: 'system_key', definition: 'TEXT' },
+        { name: 'request_scope', definition: 'TEXT' }
       ], (err) => {
         if (err) {
           console.error('[MIGRATION] Failed to ensure requests table schema:', err);
@@ -351,7 +354,24 @@ function initializeTables() {
         notes TEXT,
         FOREIGN KEY (request_id) REFERENCES requests(id)
       )
-    `);
+    `, (err) => {
+      if (err) {
+        console.error('Error creating onboarding_requests table:', err);
+      } else {
+        // Ensure onboarding_requirements columns exist (migration)
+        ensureTableSchema('onboarding_requests', [
+          { name: 'email_needed', definition: 'INTEGER DEFAULT 0' },
+          { name: 'device_needed', definition: 'INTEGER DEFAULT 0' },
+          { name: 'systems_json', definition: 'TEXT' }
+        ], (err2) => {
+          if (err2) {
+            console.error('[MIGRATION] Failed to ensure onboarding_requests schema:', err2);
+          } else {
+            console.log('[MIGRATION] onboarding_requests table schema verified');
+          }
+        });
+      }
+    });
 
     // Vehicles
     db.run(`
@@ -464,7 +484,7 @@ db.get(`SELECT COUNT(*) AS count FROM employees`, (err, row) => {
   const hashPassword = (password) =>
     crypto.createHash('sha256').update(password).digest('hex');
 
-  // ✅ Always ensure these exist (won’t duplicate because email is UNIQUE)
+  // ✅ Always ensure these exist (won't duplicate because email is UNIQUE)
   const requiredEmployees = [
     // email, password_hash, full_name, department, role, is_active, is_lead
     ['admin@housing.gov.om', hashPassword('password123'), 'Super Admin', 'Administration', 'SUPER_ADMIN', 1, 1],
@@ -472,6 +492,14 @@ db.get(`SELECT COUNT(*) AS count FROM employees`, (err, row) => {
     ['hr@housing.gov.om', hashPassword('password123'), 'HR Admin', 'HR', 'HR_ADMIN', 1, 1],
     ['fleet@housing.gov.om', hashPassword('password123'), 'Fleet Admin', 'Fleet', 'FLEET_ADMIN', 1, 0],
     ['ismail@housing.gov.om', hashPassword('password123'), 'Ismail Al Abdali', 'Programmer', 'EMPLOYEE', 1, 0],
+    // New IT admin roles
+    ['m365@housing.gov.om', hashPassword('password123'), 'M365 Admin', 'IT', 'IT_M365_ADMIN', 1, 0],
+    ['bi@housing.gov.om', hashPassword('password123'), 'BI Admin', 'IT', 'IT_BI_ADMIN', 1, 0],
+    ['aconex@housing.gov.om', hashPassword('password123'), 'Aconex Admin', 'IT', 'IT_ACONEX_ADMIN', 1, 0],
+    ['autodesk@housing.gov.om', hashPassword('password123'), 'Autodesk Admin', 'IT', 'IT_AUTODESK_ADMIN', 1, 0],
+    ['p6@housing.gov.om', hashPassword('password123'), 'P6 Admin', 'IT', 'IT_P6_ADMIN', 1, 0],
+    ['risk@housing.gov.om', hashPassword('password123'), 'Risk Admin', 'IT', 'IT_RISK_ADMIN', 1, 0],
+    ['devices@housing.gov.om', hashPassword('password123'), 'Devices/Email Admin', 'IT', 'IT_DEVICES_EMAIL_ADMIN', 1, 0],
   ];
 
   const stmt = db.prepare(`
@@ -493,6 +521,13 @@ db.get(`SELECT COUNT(*) AS count FROM employees`, (err, row) => {
       console.log('  - hr@housing.gov.om (HR_ADMIN)');
       console.log('  - fleet@housing.gov.om (FLEET_ADMIN)');
       console.log('  - ismail@housing.gov.om (EMPLOYEE)');
+      console.log('  - m365@housing.gov.om (IT_M365_ADMIN)');
+      console.log('  - bi@housing.gov.om (IT_BI_ADMIN)');
+      console.log('  - aconex@housing.gov.om (IT_ACONEX_ADMIN)');
+      console.log('  - autodesk@housing.gov.om (IT_AUTODESK_ADMIN)');
+      console.log('  - p6@housing.gov.om (IT_P6_ADMIN)');
+      console.log('  - risk@housing.gov.om (IT_RISK_ADMIN)');
+      console.log('  - devices@housing.gov.om (IT_DEVICES_EMAIL_ADMIN)');
     }
     markDbReady();
   });

@@ -45,8 +45,36 @@ const generateToken = () => {
 
 // Helper function to check if role is admin
 const isAdminRole = (role) => {
-  const adminRoles = ['SUPER_ADMIN', 'IT_ADMIN', 'HR_ADMIN', 'FLEET_ADMIN'];
+  const adminRoles = ['SUPER_ADMIN', 'IT_ADMIN', 'HR_ADMIN', 'FLEET_ADMIN',
+    'IT_M365_ADMIN', 'IT_BI_ADMIN', 'IT_ACONEX_ADMIN', 'IT_AUTODESK_ADMIN',
+    'IT_P6_ADMIN', 'IT_RISK_ADMIN', 'IT_DEVICES_EMAIL_ADMIN'];
   return adminRoles.includes(role);
+};
+
+// System to role mapping for IT requests
+const SYSTEM_TO_ROLE = {
+  'M365': 'IT_M365_ADMIN',
+  'POWER_BI': 'IT_BI_ADMIN',
+  'ACONEX': 'IT_ACONEX_ADMIN',
+  'AUTODESK': 'IT_AUTODESK_ADMIN',
+  'P6': 'IT_P6_ADMIN',
+  'RISK': 'IT_RISK_ADMIN'
+};
+
+// Helper to get assigned role for IT request based on category and system
+const getITAssignedRole = (category, systemKey) => {
+  // Devices & Materials -> IT_DEVICES_EMAIL_ADMIN
+  if (category === 'Devices & Materials') {
+    return 'IT_DEVICES_EMAIL_ADMIN';
+  }
+  
+  // Access & Permissions or Software / License with system -> system admin
+  if ((category === 'Access & Permissions' || category === 'Software / License') && systemKey) {
+    return SYSTEM_TO_ROLE[systemKey] || 'IT_ADMIN';
+  }
+  
+  // Support / Incident or no system -> IT_ADMIN (super IT admin)
+  return 'IT_ADMIN';
 };
 
 // Structured logging for failed operations
@@ -1013,6 +1041,7 @@ app.post('/api/it-requests', authRequired, (req, res) => {
     description,
     category,
     systemName,
+    systemKey, // New: system key for routing
     impact,
     urgency,
     assetTag
@@ -1031,6 +1060,9 @@ app.post('/api/it-requests', authRequired, (req, res) => {
   }
 
   const employeeId = req.user.id;
+  
+  // Determine assigned role based on category and system
+  const assignedRole = getITAssignedRole(category, systemKey);
 
   // Use immediate transaction mode to avoid locking issues
   // IMMEDIATE mode allows reads but requires exclusive lock for writes
@@ -1046,18 +1078,17 @@ app.post('/api/it-requests', authRequired, (req, res) => {
     const workflow = getWorkflow('IT');
     const workflowStatus = 'SUBMITTED';
     const currentStep = 'SUBMITTED';
-    const assignedRole = workflow?.assignedRole || 'IT_ADMIN';
     // Status should match the workflow step - SUBMITTED step uses PENDING status
     const status = getStatusFromWorkflowStep('IT', currentStep);
 
     db.run(
       `
         INSERT INTO requests (type, title, description, requester_name, department, status, employee_id, 
-                               assigned_role, workflow_status, current_step)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                               assigned_role, workflow_status, current_step, system_key, request_scope)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
       ['IT', title, description || '', req.user.fullName, req.user.department || '', status, employeeId, 
-       assignedRole, workflowStatus, currentStep],
+       assignedRole, workflowStatus, currentStep, systemKey || null, 'IT'],
       function (err2) {
         if (err2) {
           db.run('ROLLBACK', () => {}); // Ignore rollback errors
@@ -1146,7 +1177,7 @@ app.post('/api/it-requests', authRequired, (req, res) => {
 
 // ---------------- Onboarding Requests ----------------
 
-app.post('/api/onboarding', authRequired, (req, res) => {
+app.post('/api/onboarding', authRequired, requireRole('SUPER_ADMIN', 'HR_ADMIN'), (req, res) => {
   const {
     requesterName, // manager
     department,
@@ -1154,9 +1185,13 @@ app.post('/api/onboarding', authRequired, (req, res) => {
     position,
     location,
     startDate,
-    deviceType,
+    deviceType, // Keep for backward compatibility
     vpnRequired,
-    notes
+    notes,
+    // New fields for child requests
+    emailNeeded,
+    deviceNeeded,
+    systemsRequested // Array of system keys
   } = req.body;
 
   // Validation
@@ -1174,6 +1209,11 @@ app.post('/api/onboarding', authRequired, (req, res) => {
   } catch (e) {
     return res.status(400).json({ error: 'Invalid start date' });
   }
+
+  // Normalize requirements (support both old and new format)
+  const needsEmail = emailNeeded !== undefined ? !!emailNeeded : false;
+  const needsDevice = deviceNeeded !== undefined ? !!deviceNeeded : (deviceType && deviceType.trim() ? true : false);
+  const systems = Array.isArray(systemsRequested) ? systemsRequested : [];
 
   const title = `Onboarding for ${employeeName}`;
   const description = `Position: ${position} - Start: ${startDate}`;
@@ -1196,23 +1236,24 @@ app.post('/api/onboarding', authRequired, (req, res) => {
     }
 
     const workflow = getWorkflow('ONBOARDING');
-    const workflowStatus = 'SUBMITTED';
-    const currentStep = 'SUBMITTED';
-    const assignedRole = workflow?.assignedRole || 'HR_ADMIN';
-    // Status should match the workflow step - SUBMITTED step uses PENDING status
+    const workflowStatus = 'HR_SUBMITTED';
+    const currentStep = 'HR_SUBMITTED';
+    // Parent onboarding starts with HR_SUBMITTED, then moves to IT_IN_PROGRESS
+    const assignedRole = 'IT_ADMIN'; // Parent assigned to IT_ADMIN for coordination
     const status = getStatusFromWorkflowStep('ONBOARDING', currentStep);
 
+    // Create parent onboarding request
     db.run(
       `
         INSERT INTO requests (type, title, description, requester_name, department, status, employee_id, 
-                               assigned_role, workflow_status, current_step)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                               assigned_role, workflow_status, current_step, request_scope)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
       ['ONBOARDING', title, description, req.user.fullName, req.user.department || '', status, employeeId, 
-       assignedRole, workflowStatus, currentStep],
+       assignedRole, workflowStatus, currentStep, 'ONBOARDING'],
       function (err2) {
         if (err2) {
-          db.run('ROLLBACK', () => {}); // Ignore rollback errors
+          db.run('ROLLBACK', () => {});
           logError('/api/onboarding', 'insert_request', err2, {
             type: 'ONBOARDING',
             employeeId,
@@ -1223,16 +1264,18 @@ app.post('/api/onboarding', authRequired, (req, res) => {
             'Failed to create request record. Please try again.'
           ));
         }
-        const requestId = this.lastID;
+        const parentRequestId = this.lastID;
 
+        // Store onboarding details with requirements
         db.run(
           `
             INSERT INTO onboarding_requests
-            (request_id, employee_name, position, department, location, start_date, device_type, vpn_required, notes)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (request_id, employee_name, position, department, location, start_date, device_type, vpn_required, notes,
+             email_needed, device_needed, systems_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           `,
           [
-            requestId,
+            parentRequestId,
             employeeName,
             position,
             department || '',
@@ -1240,19 +1283,121 @@ app.post('/api/onboarding', authRequired, (req, res) => {
             startDate,
             deviceType || '',
             vpnRequired ? 1 : 0,
-            notes || ''
+            notes || '',
+            needsEmail ? 1 : 0,
+            needsDevice ? 1 : 0,
+            JSON.stringify(systems)
           ],
           function (err3) {
             if (err3) {
-              db.run('ROLLBACK', () => {}); // Ignore rollback errors
+              db.run('ROLLBACK', () => {});
               logError('/api/onboarding', 'insert_onboarding_details', err3, {
-                requestId,
+                parentRequestId,
                 employeeName: employeeName?.substring(0, 20)
               });
               return res.status(500).json(formatErrorResponse(
                 err3,
                 'Failed to create onboarding details. Request was created but details failed.'
               ));
+            }
+            
+            // Calculate expected child count
+            const expectedChildCount = (needsEmail ? 1 : 0) + (needsDevice ? 1 : 0) + systems.length;
+            
+            // Create child requests (all within transaction)
+            let childCount = 0;
+            let hasError = false;
+            
+            // Email child request
+            if (needsEmail) {
+              const emailTitle = `Email Setup: ${employeeName}`;
+              const emailDesc = `Email account setup for ${employeeName} (${position})`;
+              const emailStatus = getStatusFromWorkflowStep('IT', 'SUBMITTED');
+              
+              db.run(
+                `INSERT INTO requests (type, title, description, requester_name, department, status, employee_id,
+                                       assigned_role, workflow_status, current_step, parent_request_id, request_scope)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                ['ONBOARDING_EMAIL', emailTitle, emailDesc, req.user.fullName, req.user.department || '', emailStatus,
+                 employeeId, 'IT_DEVICES_EMAIL_ADMIN', 'SUBMITTED', 'SUBMITTED', parentRequestId, 'ONBOARDING'],
+                function(err4) {
+                  if (err4) {
+                    hasError = true;
+                    console.warn('[ONBOARDING] Failed to create email child:', err4);
+                  } else {
+                    childCount++;
+                  }
+                }
+              );
+            }
+            
+            // Device child request
+            if (needsDevice) {
+              const deviceTitle = `Device Setup: ${deviceType || 'Device'} for ${employeeName}`;
+              const deviceDesc = `Device setup for ${employeeName} (${position})\nDevice: ${deviceType || 'Device'}\nVPN: ${vpnRequired ? 'Yes' : 'No'}`;
+              const deviceStatus = getStatusFromWorkflowStep('IT', 'SUBMITTED');
+              
+              db.run(
+                `INSERT INTO requests (type, title, description, requester_name, department, status, employee_id,
+                                       assigned_role, workflow_status, current_step, parent_request_id, request_scope)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                ['ONBOARDING_DEVICE', deviceTitle, deviceDesc, req.user.fullName, req.user.department || '', deviceStatus,
+                 employeeId, 'IT_DEVICES_EMAIL_ADMIN', 'SUBMITTED', 'SUBMITTED', parentRequestId, 'ONBOARDING'],
+                function(err5) {
+                  if (err5) {
+                    hasError = true;
+                    console.warn('[ONBOARDING] Failed to create device child:', err5);
+                  } else {
+                    childCount++;
+                  }
+                }
+              );
+            }
+            
+            // System access child requests (one per system)
+            systems.forEach((systemKey) => {
+              const systemRole = SYSTEM_TO_ROLE[systemKey] || 'IT_ADMIN';
+              const systemName = {
+                'M365': 'Microsoft 365',
+                'POWER_BI': 'Power BI Pro',
+                'ACONEX': 'Aconex',
+                'AUTODESK': 'Autodesk',
+                'P6': 'Primavera P6',
+                'RISK': 'RiskHive'
+              }[systemKey] || systemKey;
+              
+              const systemTitle = `System Access: ${systemName} for ${employeeName}`;
+              const systemDesc = `System access request for ${employeeName} (${position})\nSystem: ${systemName}`;
+              const systemStatus = getStatusFromWorkflowStep('IT', 'SUBMITTED');
+              
+              db.run(
+                `INSERT INTO requests (type, title, description, requester_name, department, status, employee_id,
+                                       assigned_role, workflow_status, current_step, parent_request_id, system_key, request_scope)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                ['ONBOARDING_SYSTEM', systemTitle, systemDesc, req.user.fullName, req.user.department || '', systemStatus,
+                 employeeId, systemRole, 'SUBMITTED', 'SUBMITTED', parentRequestId, systemKey, 'ONBOARDING'],
+                function(err6) {
+                  if (err6) {
+                    hasError = true;
+                    console.warn(`[ONBOARDING] Failed to create system child for ${systemKey}:`, err6);
+                  } else {
+                    childCount++;
+                  }
+                }
+              );
+            });
+            
+            // Update parent workflow to IT_IN_PROGRESS if we have children
+            if (expectedChildCount > 0) {
+              db.run(
+                `UPDATE requests SET workflow_status = ?, current_step = ?, status = ? WHERE id = ?`,
+                ['IT_IN_PROGRESS', 'IT_IN_PROGRESS', 'IN_PROGRESS', parentRequestId],
+                (err7) => {
+                  if (err7) {
+                    console.warn('[ONBOARDING] Failed to update parent workflow status:', err7);
+                  }
+                }
+              );
             }
             
             // Commit transaction
@@ -1265,171 +1410,38 @@ app.post('/api/onboarding', authRequired, (req, res) => {
                 ));
               }
               
-              // Log action (non-blocking - don't fail request creation if logging fails)
-              logRequestAction(requestId, 'CREATE', null, workflowStatus, employeeId, 
-                `Onboarding request created for ${employeeName}`, (logErr) => {
+              // Log action (non-blocking)
+              const childCountMsg = hasError ? `${childCount}/${expectedChildCount}` : `${expectedChildCount}`;
+              logRequestAction(parentRequestId, 'CREATE', null, workflowStatus, employeeId, 
+                `Onboarding request created for ${employeeName} with ${childCountMsg} child request(s)`, (logErr) => {
                   if (logErr) {
                     console.warn('[AUDIT] Failed to log onboarding request action (non-critical):', logErr);
                   }
                 });
 
-              // Auto-create IT request if device is selected (on submission, not completion)
-              if (deviceType && deviceType.trim()) {
-                const itTitle = `Device Setup: ${deviceType} for ${employeeName}`;
-                const itDescription = `Automatic IT request generated from onboarding request #${requestId}.\n\n` +
-                  `Employee: ${employeeName}\n` +
-                  `Position: ${position}\n` +
-                  `Department: ${department || 'N/A'}\n` +
-                  `Location: ${location || 'N/A'}\n` +
-                  `Start Date: ${startDate}\n` +
-                  `Device Type: ${deviceType}\n` +
-                  `VPN Required: ${vpnRequired ? 'Yes' : 'No'}`;
-                
-                const itWorkflow = getWorkflow('IT');
-                const itWorkflowStatus = 'SUBMITTED';
-                const itCurrentStep = 'SUBMITTED';
-                const itAssignedRole = itWorkflow?.assignedRole || 'IT_ADMIN';
-                // Status should match the workflow step - SUBMITTED step uses PENDING status
-                const itStatus = getStatusFromWorkflowStep('IT', itCurrentStep);
-                
-                // Create IT request in separate transaction (non-blocking)
-                db.run('BEGIN IMMEDIATE TRANSACTION', (beginErr2) => {
-                  if (beginErr2) {
-                    console.warn('[AUTO-IT] Failed to start transaction for auto IT request (non-critical):', beginErr2);
-                    // Continue with onboarding response even if IT request creation fails
-                    return res.json({
-                      id: requestId,
-              requestId,
-              type: 'ONBOARDING',
-              title,
-              requesterName,
-              employeeName,
-              position,
-              location,
-              startDate,
-              deviceType,
-              vpnRequired: !!vpnRequired,
-                      status,
-                      workflowStatus,
-                      currentStep,
-                      autoITRequestCreated: false,
-                      message: 'Onboarding created. Note: Auto IT request creation failed.'
-                    });
-                  }
-                  
-                  db.run(
-                    `INSERT INTO requests (type, title, description, requester_name, department, status, employee_id, 
-                                         assigned_role, workflow_status, current_step)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                    ['IT', itTitle, itDescription, req.user.fullName, req.user.department || '', itStatus, employeeId,
-                     itAssignedRole, itWorkflowStatus, itCurrentStep],
-                    function (err4) {
-                      if (err4) {
-                        db.run('ROLLBACK', () => {});
-                        console.warn('[AUTO-IT] Failed to create IT request (non-critical):', err4);
-                        return res.json({
-                          id: requestId,
-                          requestId,
-                          type: 'ONBOARDING',
-                          title,
-                          requesterName,
-                          employeeName,
-                          position,
-                          location,
-                          startDate,
-                          deviceType,
-                          vpnRequired: !!vpnRequired,
-                          status,
-                          workflowStatus,
-                          currentStep,
-                          autoITRequestCreated: false,
-                          message: 'Onboarding created. Note: Auto IT request creation failed.'
-                        });
-                      }
-                      
-                      const itRequestId = this.lastID;
-                      
-                      db.run(
-                        `INSERT INTO it_requests (request_id, category, system_name, impact, urgency, asset_tag)
-                         VALUES (?, ?, ?, ?, ?, ?)`,
-                        [itRequestId, 'Devices & Materials', deviceType, 'High', 'High', `ONBOARDING-${requestId}`],
-                        function (err5) {
-                          if (err5) {
-                            db.run('ROLLBACK', () => {});
-                            console.warn('[AUTO-IT] Failed to create IT request details (non-critical):', err5);
-                            return res.json({
-                              id: requestId,
-                              requestId,
-                              type: 'ONBOARDING',
-                              title,
-                              requesterName,
-                              employeeName,
-                              position,
-                              location,
-                              startDate,
-                              deviceType,
-                              vpnRequired: !!vpnRequired,
-                              status,
-                              workflowStatus,
-                              currentStep,
-                              autoITRequestCreated: false,
-                              message: 'Onboarding created. Note: Auto IT request creation failed.'
-                            });
-                          }
-                          
-                          db.run('COMMIT', (commitErr2) => {
-                            if (commitErr2) {
-                              console.warn('[AUTO-IT] Failed to commit IT request (non-critical):', commitErr2);
-                            } else {
-                              console.log(`[AUTO-IT] Successfully created IT request #${itRequestId} for onboarding #${requestId}`);
-                              logRequestAction(itRequestId, 'CREATE', null, itWorkflowStatus, employeeId,
-                                `Auto-generated from onboarding request #${requestId}`, () => {});
-                            }
-                            
-                            return res.json({
-                              id: requestId,
-                              requestId,
-                              type: 'ONBOARDING',
-                              title,
-                              requesterName,
-                              employeeName,
-                              position,
-                              location,
-                              startDate,
-                              deviceType,
-                              vpnRequired: !!vpnRequired,
-                              status,
-                              workflowStatus,
-                              currentStep,
-                              autoITRequestCreated: true,
-                              autoITRequestId: itRequestId,
-                              message: 'Onboarding created. IT request auto-created for device setup.'
-                            });
-                          });
-                        }
-                      );
-                    }
-                  );
-                });
-              } else {
-                // No device - normal response
-                return res.json({
-                  id: requestId,
-                  requestId,
-                  type: 'ONBOARDING',
-                  title,
-                  requesterName,
-                  employeeName,
-                  position,
-                  location,
-                  startDate,
-                  deviceType,
-                  vpnRequired: !!vpnRequired,
-                  status,
-                  workflowStatus,
-                  currentStep
-                });
-              }
+              return res.json({
+                id: parentRequestId,
+                requestId: parentRequestId,
+                type: 'ONBOARDING',
+                title,
+                requesterName,
+                employeeName,
+                position,
+                location,
+                startDate,
+                deviceType: deviceType || '',
+                vpnRequired: !!vpnRequired,
+                status: 'IN_PROGRESS',
+                workflowStatus: 'IT_IN_PROGRESS',
+                currentStep: 'IT_IN_PROGRESS',
+                emailNeeded: needsEmail,
+                deviceNeeded: needsDevice,
+                systemsRequested: systems,
+                childRequestsCount: expectedChildCount,
+                message: hasError 
+                  ? `Onboarding created. Note: Some child requests may have failed (${childCount}/${expectedChildCount} created).`
+                  : `Onboarding created with ${expectedChildCount} child request(s)`
+              });
             });
           }
         );
@@ -1449,6 +1461,7 @@ app.get('/api/requests', authRequired, (req, res) => {
            department, status, employee_id AS employeeId, 
            assigned_role AS assignedRole, assigned_to_employee_id AS assignedToEmployeeId,
            workflow_status AS workflowStatus, current_step AS currentStep,
+           parent_request_id AS parentRequestId, system_key AS systemKey, request_scope AS requestScope,
            created_at AS createdAt, updated_at AS updatedAt
     FROM requests
   `;
@@ -1461,8 +1474,10 @@ app.get('/api/requests', authRequired, (req, res) => {
   // The 'type' column distinguishes between request types. All admins see ALL requests of their type,
   // regardless of who created them (employee_id is not filtered for admins).
   // - Normal employee: only their own requests (filtered by employee_id)
-  // - IT_ADMIN: ALL IT requests (type = 'IT') + Onboarding requests in IT_SETUP step
-  // - HR_ADMIN: ALL ONBOARDING requests (type = 'ONBOARDING')
+  // - IT_ADMIN: ALL IT-related requests (IT + onboarding parent + onboarding children)
+  // - System Admins (IT_M365_ADMIN, etc.): Only requests assigned to their role (assigned_role = their role)
+  // - IT_DEVICES_EMAIL_ADMIN: Only requests assigned to IT_DEVICES_EMAIL_ADMIN
+  // - HR_ADMIN: Onboarding parent requests (type = 'ONBOARDING')
   // - FLEET_ADMIN: ALL CAR_BOOKING requests (type = 'CAR_BOOKING')
   // - SUPER_ADMIN: all requests (no filter)
   if (userRole === 'SUPER_ADMIN') {
@@ -1477,14 +1492,20 @@ app.get('/api/requests', authRequired, (req, res) => {
       params.push(statusFilter);
     }
   } else if (userRole === 'IT_ADMIN') {
-    // IT_ADMIN sees: All IT requests (regardless of who created them) + Onboarding requests in IT_SETUP step
+    // IT_ADMIN sees: All IT requests + onboarding parent + onboarding children
     conditions.push(`(
       type = ? OR 
-      (type = ? AND (current_step = ? OR workflow_status = ?))
+      (type = ? AND parent_request_id IS NULL) OR
+      (type IN ('ONBOARDING_EMAIL', 'ONBOARDING_DEVICE', 'ONBOARDING_SYSTEM'))
     )`);
-    params.push('IT', 'ONBOARDING', 'IT_SETUP', 'IT_SETUP');
+    params.push('IT', 'ONBOARDING');
+  } else if (userRole.startsWith('IT_') && userRole !== 'IT_ADMIN') {
+    // System admins and devices/email admin: only requests assigned to their role
+    conditions.push(`assigned_role = ?`);
+    params.push(userRole);
   } else if (userRole === 'HR_ADMIN') {
-    conditions.push(`type = ?`);
+    // HR_ADMIN sees onboarding parent requests
+    conditions.push(`(type = ? AND parent_request_id IS NULL)`);
     params.push('ONBOARDING');
   } else if (userRole === 'FLEET_ADMIN') {
     conditions.push(`type = ?`);
@@ -1525,6 +1546,7 @@ app.get('/api/requests/:id', authRequired, (req, res) => {
              department, status, employee_id AS employeeId, 
              assigned_role AS assignedRole, assigned_to_employee_id AS assignedToEmployeeId,
              workflow_status AS workflowStatus, current_step AS currentStep,
+             parent_request_id AS parentRequestId, system_key AS systemKey, request_scope AS requestScope,
              created_at AS createdAt, updated_at AS updatedAt
       FROM requests
       WHERE id = ?
@@ -1544,8 +1566,9 @@ app.get('/api/requests/:id', authRequired, (req, res) => {
       
       // Check permissions based on role:
       // - SUPER_ADMIN: can access any request
-      // - IT_ADMIN: can access IT requests + ONBOARDING requests in IT_SETUP step
-      // - HR_ADMIN: can access ONBOARDING requests and IT requests
+      // - IT_ADMIN: can access all IT-related requests (IT + onboarding parent + children)
+      // - System admins: can access requests assigned to their role
+      // - HR_ADMIN: can access ONBOARDING parent requests
       // - FLEET_ADMIN: can only access CAR_BOOKING requests
       // - Normal employee: can only access their own requests
       let hasAccess = false;
@@ -1553,13 +1576,20 @@ app.get('/api/requests/:id', authRequired, (req, res) => {
       if (userRole === 'SUPER_ADMIN') {
         hasAccess = true;
       } else if (userRole === 'IT_ADMIN') {
-        if (request.type === 'IT') {
+        // IT_ADMIN can see all IT-related requests
+        if (request.type === 'IT' || request.type === 'ONBOARDING' || 
+            request.type === 'ONBOARDING_EMAIL' || request.type === 'ONBOARDING_DEVICE' || 
+            request.type === 'ONBOARDING_SYSTEM') {
           hasAccess = true;
-        } else if (request.type === 'ONBOARDING' && (request.currentStep === 'IT_SETUP' || request.workflowStatus === 'IT_SETUP')) {
+        }
+      } else if (userRole.startsWith('IT_') && userRole !== 'IT_ADMIN') {
+        // System admins can see requests assigned to their role
+        if (request.assignedRole === userRole) {
           hasAccess = true;
         }
       } else if (userRole === 'HR_ADMIN') {
-        if (request.type === 'ONBOARDING' || request.type === 'IT') {
+        // HR_ADMIN can see onboarding parent requests
+        if (request.type === 'ONBOARDING' && !request.parentRequestId) {
           hasAccess = true;
         }
       } else if (userRole === 'FLEET_ADMIN' && request.type === 'CAR_BOOKING') {
@@ -1623,6 +1653,7 @@ app.get('/api/requests/:id', authRequired, (req, res) => {
           }
         );
       } else if (request.type === 'ONBOARDING') {
+        // Fetch onboarding details and children
         db.get(
           `SELECT * FROM onboarding_requests WHERE request_id = ?`,
           [requestId],
@@ -1631,12 +1662,46 @@ app.get('/api/requests/:id', authRequired, (req, res) => {
               logError('/api/requests/:id', 'select_onboarding', err2, { requestId });
               return res.status(500).json({ error: 'Failed to load onboarding details. Please try again.' });
             }
+            
+            // Fetch children if this is a parent request
+            db.all(
+              `SELECT id, type, title, status, workflow_status, current_step, assigned_role, system_key, created_at
+               FROM requests WHERE parent_request_id = ? ORDER BY created_at ASC`,
+              [requestId],
+              (err3, children) => {
+                if (err3) {
+                  console.warn('[ONBOARDING] Failed to load children:', err3);
+                }
+                
+                res.json({
+                  ...request,
+                  onboarding: onboarding ? {
+                    ...onboarding,
+                    vpnRequired: !!onboarding.vpn_required,
+                    emailNeeded: !!onboarding.email_needed,
+                    deviceNeeded: !!onboarding.device_needed,
+                    systemsRequested: onboarding.systems_json ? JSON.parse(onboarding.systems_json) : []
+                  } : null,
+                  children: children || []
+                });
+              }
+            );
+          }
+        );
+      } else if (request.type === 'ONBOARDING_EMAIL' || request.type === 'ONBOARDING_DEVICE' || request.type === 'ONBOARDING_SYSTEM') {
+        // Fetch parent request for child requests
+        db.get(
+          `SELECT id, type, title, status, workflow_status, current_step, employee_id, requester_name, department
+           FROM requests WHERE id = ?`,
+          [request.parentRequestId],
+          (err2, parent) => {
+            if (err2) {
+              console.warn('[ONBOARDING] Failed to load parent:', err2);
+            }
+            
             res.json({
               ...request,
-              onboarding: onboarding ? {
-                ...onboarding,
-                vpnRequired: !!onboarding.vpn_required
-              } : null
+              parent: parent || null
             });
           }
         );
@@ -1656,7 +1721,7 @@ app.patch('/api/requests/:id/status', authRequired, (req, res) => {
   const userId = req.user.id;
 
   // Get current request to check type, current status, and ownership
-  db.get('SELECT type, status AS currentStatus, workflow_status AS currentWorkflowStatus, current_step AS currentStep, assigned_role AS assignedRole, employee_id AS employeeId FROM requests WHERE id = ?', 
+  db.get('SELECT type, status AS currentStatus, workflow_status AS currentWorkflowStatus, current_step AS currentStep, assigned_role AS assignedRole, employee_id AS employeeId, parent_request_id AS parentRequestId FROM requests WHERE id = ?', 
     [requestId], 
     (err, request) => {
       if (err) {
@@ -1692,29 +1757,26 @@ app.patch('/api/requests/:id/status', authRequired, (req, res) => {
       // Role-based workflow validation for non-cancellation updates
       if (userRole !== 'SUPER_ADMIN') {
         if (request.type === 'ONBOARDING') {
-          // ONBOARDING workflow: SUBMITTED -> HR_REVIEW -> IT_SETUP -> COMPLETED
+          // ONBOARDING parent: Only IT_ADMIN can update (HR can only view)
           if (userRole === 'HR_ADMIN') {
-            // HR_ADMIN can update onboarding requests and move through workflow
-            // Allow status updates and workflow progression
-            if (currentStep === 'IT_SETUP' || workflowStatus === 'IT_SETUP') {
-              // When moving to IT_SETUP, change assigned_role to IT_ADMIN
-              // This will be handled in the update below
-            }
-            // HR_ADMIN can update status and workflow for onboarding requests
+            return res.status(403).json({ error: 'HR Admin can view but not edit onboarding requests. Only IT Admin can update.' });
           } else if (userRole === 'IT_ADMIN') {
-            // IT_ADMIN can update when current_step is IT_SETUP or workflowStatus is IT_SETUP
-            if (request.currentStep !== 'IT_SETUP' && request.workflowStatus !== 'IT_SETUP') {
-              return res.status(403).json({ error: 'IT Admin can only update onboarding requests in IT_SETUP step' });
-            }
-            // IT_ADMIN can update status (IN_PROGRESS, COMPLETED, etc.) for onboarding in IT_SETUP
+            // IT_ADMIN can update onboarding parent requests
           } else {
             return res.status(403).json({ error: 'You do not have permission to update this onboarding request' });
           }
+        } else if (request.type === 'ONBOARDING_EMAIL' || request.type === 'ONBOARDING_DEVICE' || request.type === 'ONBOARDING_SYSTEM') {
+          // Child requests: ONLY assigned role can update (system admins control their data)
+          if (request.assignedRole !== userRole) {
+            return res.status(403).json({ error: 'You can only update requests assigned to your role' });
+          }
         } else if (request.type === 'IT') {
-          // IT requests: SUPER_ADMIN, IT_ADMIN, and HR_ADMIN can update
-          // (SUPER_ADMIN bypasses this check via the outer if condition)
-          if (userRole !== 'IT_ADMIN' && userRole !== 'HR_ADMIN') {
-            return res.status(403).json({ error: 'Only IT Admin or HR Admin can update IT requests' });
+          // IT requests: IT_ADMIN (super admin) OR assigned system admin can update
+          // HR_ADMIN cannot update IT requests
+          if (userRole === 'HR_ADMIN') {
+            return res.status(403).json({ error: 'HR Admin can view but not edit IT requests. Only IT Admin or assigned admin can update.' });
+          } else if (userRole !== 'IT_ADMIN' && request.assignedRole !== userRole) {
+            return res.status(403).json({ error: 'Only IT Admin or assigned admin can update this IT request' });
           }
         } else if (request.type === 'CAR_BOOKING') {
           // Car bookings: FLEET_ADMIN can update (but cancellation is handled above)
@@ -1813,9 +1875,79 @@ app.patch('/api/requests/:id/status', authRequired, (req, res) => {
               }
             });
           
-          // Note: IT requests are now auto-created on onboarding submission (not completion)
-          // This section removed - IT requests created immediately when onboarding is submitted with device
-          if (false && request.type === 'ONBOARDING' && (status === 'COMPLETED' || workflowStatus === 'COMPLETED')) {
+          // Auto-complete parent onboarding when all children are completed
+          // Check if this is a child request that was just updated
+          if ((request.type === 'ONBOARDING_EMAIL' || request.type === 'ONBOARDING_DEVICE' || request.type === 'ONBOARDING_SYSTEM') &&
+              (status === 'COMPLETED' || (status && status !== request.currentStatus))) {
+            // Get parent request ID
+            db.get('SELECT parent_request_id FROM requests WHERE id = ?', [requestId], (err3, child) => {
+              if (!err3 && child && child.parent_request_id) {
+                const parentId = child.parent_request_id;
+                
+                // Check if all children are completed
+                db.all(
+                  `SELECT id, status FROM requests WHERE parent_request_id = ?`,
+                  [parentId],
+                  (err4, children) => {
+                    if (!err4 && children && children.length > 0) {
+                      const allCompleted = children.every(c => c.status === 'COMPLETED');
+                      
+                      if (allCompleted) {
+                        // Update parent to COMPLETED
+                        db.run(
+                          `UPDATE requests SET status = ?, workflow_status = ?, current_step = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+                          ['COMPLETED', 'COMPLETED', 'COMPLETED', parentId],
+                          (err5) => {
+                            if (err5) {
+                              console.warn('[ONBOARDING] Failed to auto-complete parent:', err5);
+                            } else {
+                              console.log(`[ONBOARDING] Auto-completed parent onboarding #${parentId} - all children completed`);
+                              logRequestAction(parentId, 'AUTO_COMPLETE', 'IN_PROGRESS', 'COMPLETED', 
+                                req.user.id, 'All child requests completed', () => {});
+                            }
+                          }
+                        );
+                      }
+                    }
+                  }
+                );
+              }
+            });
+          }
+          
+          // Return updated request with parent status if applicable
+          const finalStatus = status || request.currentStatus;
+          const responseData = {
+            id: requestId,
+            status: finalStatus,
+            workflowStatus: workflowStatus || request.currentWorkflowStatus,
+            currentStep: currentStep || request.currentStep,
+            message: 'Status updated successfully'
+          };
+          
+          // If this was a child request update, include parent status info
+          if ((request.type === 'ONBOARDING_EMAIL' || request.type === 'ONBOARDING_DEVICE' || request.type === 'ONBOARDING_SYSTEM') && request.parentRequestId) {
+            db.get('SELECT id, status, workflow_status, current_step FROM requests WHERE id = ?', 
+              [request.parentRequestId],
+              (err6, parent) => {
+                if (!err6 && parent) {
+                  responseData.parentStatus = parent.status;
+                  responseData.parentWorkflowStatus = parent.workflow_status;
+                  if (parent.status === 'COMPLETED') {
+                    responseData.message = 'Status updated successfully. Parent onboarding request has been auto-completed.';
+                  }
+                }
+                res.json(responseData);
+              }
+            );
+          } else {
+            res.json(responseData);
+          }
+          
+          // Note: Response is already sent above for child requests
+          // For non-child requests, response is sent above
+          // Old auto-IT creation code removed - IT requests created immediately when onboarding is submitted
+          if (false) {
             // Get onboarding details
             db.get(
               `SELECT employee_name, device_type, vpn_required, position, department, location, start_date
@@ -1950,15 +2082,6 @@ app.patch('/api/requests/:id/status', authRequired, (req, res) => {
                 }
               }
             );
-          } else {
-            // Not onboarding completion - normal response
-            return res.json({ 
-              id: requestId, 
-              status: status || request.currentStatus,
-              workflowStatus: workflowStatus || request.currentWorkflowStatus,
-              currentStep: currentStep || null,
-              message: 'Status updated successfully'
-            });
           }
         }
       );
