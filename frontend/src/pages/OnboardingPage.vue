@@ -15,8 +15,9 @@
     
     <div v-if="isHRAdmin || isSuperAdmin" class="info-banner" style="background: #e8f4f0; border-left: 4px solid var(--shc-deep-green); padding: 1.25rem 1.5rem; border-radius: 8px; margin-bottom: 2rem;">
       <p style="margin: 0; font-size: 0.9rem; color: var(--shc-deep-green); line-height: 1.6;">
-        <strong>💡 Child Requests:</strong> When you submit an onboarding request, child requests will be automatically created for:
-        email setup, device setup (if selected), and system access (for each selected system). Each child request will be assigned to the appropriate IT admin.
+        <strong>💡 Two-Step Process:</strong> 
+        <br>1. Create the onboarding request (this page) - it will be in "HR Review" status.
+        <br>2. Submit the onboarding request from "My Requests" to create child requests for IT (email, device, system access). Each child request will be assigned to the appropriate IT admin.
       </p>
     </div>
     
@@ -148,7 +149,7 @@
     <div class="actions">
       <button class="btn-primary" @click="handleSubmit" :disabled="isSubmitting">
         <span v-if="isSubmitting" class="spinner-small"></span>
-        <span>{{ isSubmitting ? 'Creating...' : 'Initialize Onboarding' }}</span>
+        <span>{{ isSubmitting ? 'Creating...' : 'Create Onboarding Request' }}</span>
       </button>
     </div>
   </div>
@@ -159,7 +160,8 @@ import { ref, onMounted, watch } from 'vue';
 import { useAuth } from '../composables/useAuth';
 import { useToast } from '../composables/useToast';
 
-const apiBase = 'http://localhost:4000/api';
+import { API_BASE } from '../config';
+const apiBase = API_BASE;
 const { currentUser, isHRAdmin, isSuperAdmin, authenticatedFetch } = useAuth();
 const { showToast } = useToast();
 
@@ -247,10 +249,8 @@ const handleSubmit = async () => {
     }
     
     let toastMessage = `Onboarding request created for ${data.employeeName}! (ID: ${data.requestId})`;
-    if (data.autoITRequestCreated) {
-      toastMessage += ` IT request #${data.autoITRequestId} auto-created for device setup!`;
-    }
-    showToast(toastMessage, 'success', data.autoITRequestCreated ? 10000 : 5000);
+    toastMessage += ` Please submit it from "My Requests" to create child requests for IT.`;
+    showToast(toastMessage, 'success', 8000);
     
     // Reset form (keep name/department)
     form.value.employeeName = '';

@@ -118,8 +118,9 @@ import { ref, computed, onMounted } from 'vue';
 import { useAuth } from '../composables/useAuth';
 import { useToast } from '../composables/useToast';
 import { useStatusFormatter } from '../composables/useStatusFormatter';
+import { API_BASE } from '../config';
 
-const apiBase = 'http://localhost:4000/api';
+const apiBase = API_BASE;
 const { authenticatedFetch } = useAuth();
 const { showToast } = useToast();
 const { formatStatus } = useStatusFormatter();

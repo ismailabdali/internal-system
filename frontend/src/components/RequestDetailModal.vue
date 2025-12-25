@@ -165,6 +165,25 @@
 
             <!-- Onboarding Details -->
             <template v-if="request.type === 'ONBOARDING' && request.onboarding">
+              <!-- HR Submit Button (if in HR_REVIEW status) -->
+              <div v-if="canSubmitOnboarding(request)" class="status-update-section" style="background: #e8f4f0; padding: 1.5rem; border-radius: 8px; margin-bottom: 1.5rem; border-left: 4px solid var(--shc-deep-green);">
+                <div style="margin-bottom: 1rem;">
+                  <h4 style="margin: 0 0 0.5rem 0; color: var(--shc-deep-green);">Submit Onboarding</h4>
+                  <p style="margin: 0; font-size: 0.9rem; color: var(--shc-text-secondary);">
+                    Submit this onboarding request to create child requests for IT (email, device, system access).
+                  </p>
+                </div>
+                <button 
+                  class="btn-primary" 
+                  @click="handleSubmitOnboarding"
+                  :disabled="submittingOnboarding"
+                  style="width: 100%;"
+                >
+                  <span v-if="submittingOnboarding" class="spinner-small"></span>
+                  {{ submittingOnboarding ? 'Submitting...' : 'Submit to IT' }}
+                </button>
+              </div>
+              
               <div class="detail-section-title">Onboarding Information</div>
               <div class="detail-row">
                 <span class="detail-label">Employee:</span>
@@ -297,6 +316,7 @@ import { ref, watch } from 'vue';
 import { useAuth } from '../composables/useAuth';
 import { useToast } from '../composables/useToast';
 import { useStatusFormatter } from '../composables/useStatusFormatter';
+import { API_BASE } from '../config';
 
 const props = defineProps({
   show: Boolean,
@@ -306,7 +326,7 @@ const props = defineProps({
 
 const emit = defineEmits(['close', 'status-update', 'add-note']);
 
-const { canUpdateRequest, canCancelBooking, canAddNotes, canViewEmployeeId, currentUser } = useAuth();
+const { canUpdateRequest, canCancelBooking, canAddNotes, canViewEmployeeId, currentUser, isHRAdmin, isSuperAdmin } = useAuth();
 const { showToast } = useToast();
 const { formatStatus } = useStatusFormatter();
 
@@ -352,6 +372,45 @@ const canUpdateChildRequest = (child) => {
 // Handle child status update
 const handleChildStatusUpdate = (childId, newStatus) => {
   emit('status-update', childId, newStatus, '');
+};
+
+// Check if user can submit onboarding (HR in HR_REVIEW status)
+const canSubmitOnboarding = (request) => {
+  if (!request || request.type !== 'ONBOARDING') return false;
+  if (!isHRAdmin.value && !isSuperAdmin.value) return false;
+  // Can submit if in HR_REVIEW status and has no children yet
+  return (request.workflowStatus === 'HR_REVIEW' || request.currentStep === 'HR_REVIEW') && 
+         (!request.children || request.children.length === 0);
+};
+
+// Handle onboarding submission
+const handleSubmitOnboarding = async () => {
+  if (!props.request || !props.request.id) return;
+  
+  submittingOnboarding.value = true;
+  try {
+    const res = await fetch(`${API_BASE}/onboarding/${props.request.id}/submit`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${localStorage.getItem('authToken')}`
+      }
+    });
+    
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.error || 'Failed to submit onboarding');
+    }
+    
+    showToast(data.message || 'Onboarding submitted successfully. Child requests created.', 'success');
+    
+    // Emit event to reload request details
+    emit('status-update', props.request.id, props.request.status, '');
+  } catch (e) {
+    showToast(e.message || 'Failed to submit onboarding', 'error', 8000);
+  } finally {
+    submittingOnboarding.value = false;
+  }
 };
 
 // Safe date formatter

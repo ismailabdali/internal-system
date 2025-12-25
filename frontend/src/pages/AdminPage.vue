@@ -333,7 +333,8 @@ import { useAuth } from '../composables/useAuth';
 import { useToast } from '../composables/useToast';
 import { useStatusFormatter } from '../composables/useStatusFormatter';
 
-const apiBase = 'http://localhost:4000/api';
+import { API_BASE } from '../config';
+const apiBase = API_BASE;
 const { isSuperAdmin, isHRAdmin, isFleetAdmin, isITAdmin, canManageEmployees, canManageVehicles, authenticatedFetch } = useAuth();
 const { showToast } = useToast();
 const { formatStatus } = useStatusFormatter();

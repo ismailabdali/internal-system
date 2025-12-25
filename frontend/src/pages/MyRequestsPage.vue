@@ -111,7 +111,8 @@ import { useToast } from '../composables/useToast';
 import { useStatusFormatter } from '../composables/useStatusFormatter';
 import RequestDetailModal from '../components/RequestDetailModal.vue';
 
-const apiBase = 'http://localhost:4000/api';
+import { API_BASE } from '../config';
+const apiBase = API_BASE;
 const { isAdminUser, isSuperAdmin, isITAdmin, isHRAdmin, isFleetAdmin, canViewEmployeeId, authenticatedFetch } = useAuth();
 const { showToast } = useToast();
 const { formatStatus } = useStatusFormatter();
@@ -204,10 +205,13 @@ const handleStatusUpdate = async (requestId, newStatus, note) => {
       showToast(`Status updated to ${newStatus}. IT request #${data.autoITRequestId} auto-created for device setup!`, 'success', 10000);
     } else if (newStatus === 'CANCELLED') {
       showToast('Booking cancelled successfully', 'success');
+    } else if (data.message) {
+      showToast(data.message, 'success');
     } else {
       showToast(`Request status updated to ${newStatus}`, 'success');
     }
     
+    // Reload request details to get updated children/parent status
     await loadRequestDetails(requestId);
     await loadRequests();
   } catch (e) {

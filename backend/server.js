@@ -10,7 +10,7 @@ const allowedOrigins = [
   'http://localhost:5173',
   'http://localhost:3000',
   'http://localhost:4000',
-  'https://YOUR-NETLIFY-URL.netlify.app'
+  'https://glistening-semolina-68da32.netlify.app'
 ];
 
 app.use(cors({
@@ -21,7 +21,7 @@ app.use(cors({
 
 app.use(express.json());
 
-const PORT = 4000;
+const PORT = process.env.PORT || 4000;
 
 // Token storage with expiration (in production, use Redis or database)
 // Structure: Map<token, { userId, expiresAt }>
@@ -540,7 +540,8 @@ const workflows = {
     steps: [
       { id: 'SUBMITTED', name: 'Submitted', description: 'Onboarding request submitted by Lead/Head', status: 'SUBMITTED' },
       { id: 'HR_REVIEW', name: 'HR Review', description: 'HR team reviewing request', status: 'IN_REVIEW' },
-      { id: 'IT_SETUP', name: 'IT Setup', description: 'IT setting up accounts and devices', status: 'IN_PROGRESS' },
+      { id: 'IT_IN_PROGRESS', name: 'IT In Progress', description: 'IT setting up accounts and devices', status: 'IN_PROGRESS' },
+      { id: 'WAITING_APPROVALS', name: 'Waiting Approvals', description: 'Waiting for system/email/device approvals', status: 'IN_PROGRESS' },
       { id: 'COMPLETED', name: 'Completed', description: 'Onboarding completed', status: 'COMPLETED' }
     ],
     defaultStep: 'SUBMITTED',
@@ -577,7 +578,8 @@ const mapWorkflowStatusToRequestStatus = (workflowStepStatus) => {
     'FLEET_REVIEW': 'APPROVED',
     'TRIAGE': 'APPROVED',
     'HR_REVIEW': 'APPROVED',
-    'IT_SETUP': 'IN_PROGRESS'
+    'IT_IN_PROGRESS': 'IN_PROGRESS',
+    'WAITING_APPROVALS': 'IN_PROGRESS'
   };
   return statusMap[workflowStepStatus] || workflowStepStatus;
 };
@@ -1248,10 +1250,10 @@ app.post('/api/onboarding', authRequired, requireRole('SUPER_ADMIN', 'HR_ADMIN')
     }
 
     const workflow = getWorkflow('ONBOARDING');
-    const workflowStatus = 'HR_SUBMITTED';
-    const currentStep = 'HR_SUBMITTED';
-    // Parent onboarding starts with HR_SUBMITTED, then moves to IT_IN_PROGRESS
-    const assignedRole = 'IT_ADMIN'; // Parent assigned to IT_ADMIN for coordination
+    const workflowStatus = 'HR_REVIEW';
+    const currentStep = 'HR_REVIEW';
+    // Parent onboarding starts with HR_REVIEW, assigned to HR_ADMIN
+    const assignedRole = 'HR_ADMIN'; // Parent assigned to HR_ADMIN initially
     const status = getStatusFromWorkflowStep('ONBOARDING', currentStep);
 
     // Create parent onboarding request
@@ -1313,13 +1315,126 @@ app.post('/api/onboarding', authRequired, requireRole('SUPER_ADMIN', 'HR_ADMIN')
               ));
             }
             
-            // Calculate expected child count
-            const expectedChildCount = (needsEmail ? 1 : 0) + (needsDevice ? 1 : 0) + systems.length;
-            
-            // Create child requests (all within transaction)
+            // Commit transaction - children will be created when HR submits
+            db.run('COMMIT', (commitErr) => {
+              if (commitErr) {
+                logError('/api/onboarding', 'commit_transaction', commitErr);
+                return res.status(500).json(formatErrorResponse(
+                  commitErr,
+                  'Failed to commit transaction. Please try again.'
+                ));
+              }
+              
+              // Log action (non-blocking)
+              logRequestAction(parentRequestId, 'CREATE', null, workflowStatus, employeeId, 
+                `Onboarding request created for ${employeeName} - awaiting HR submission`, (logErr) => {
+                  if (logErr) {
+                    console.warn('[AUDIT] Failed to log onboarding request action (non-critical):', logErr);
+                  }
+                });
+
+              return res.json({
+                id: parentRequestId,
+                requestId: parentRequestId,
+                type: 'ONBOARDING',
+                title,
+                requesterName,
+                employeeName,
+                position,
+                location,
+                startDate,
+                deviceType: deviceType || '',
+                vpnRequired: !!vpnRequired,
+                status: status,
+                workflowStatus: workflowStatus,
+                currentStep: currentStep,
+                emailNeeded: needsEmail,
+                deviceNeeded: needsDevice,
+                systemsRequested: systems,
+                message: 'Onboarding request created. Please submit to create child requests for IT.'
+              });
+            });
+          }
+        );
+      }
+    );
+  });
+});
+
+// ---------------- Submit Onboarding (Create Child Requests) ----------------
+
+app.patch('/api/onboarding/:id/submit', authRequired, requireRole('SUPER_ADMIN', 'HR_ADMIN'), (req, res) => {
+  const requestId = req.params.id;
+  const userRole = req.user.role;
+  const userId = req.user.id;
+
+  // Get parent onboarding request
+  db.get(
+    `SELECT id, type, status, workflow_status, current_step, assigned_role, employee_id
+     FROM requests WHERE id = ? AND type = 'ONBOARDING'`,
+    [requestId],
+    (err, parent) => {
+      if (err) {
+        logError('/api/onboarding/:id/submit', 'select_parent', err, { requestId });
+        return res.status(500).json({ error: 'Failed to load onboarding request. Please try again.' });
+      }
+      if (!parent) {
+        return res.status(404).json({ error: 'Onboarding request not found' });
+      }
+
+      // Check permissions - only HR_ADMIN or SUPER_ADMIN can submit
+      if (userRole !== 'HR_ADMIN' && userRole !== 'SUPER_ADMIN') {
+        return res.status(403).json({ error: 'Only HR Admin can submit onboarding requests' });
+      }
+
+      // Check if already submitted (has children or is in IT_IN_PROGRESS)
+      if (parent.workflow_status === 'IT_IN_PROGRESS' || parent.current_step === 'IT_IN_PROGRESS') {
+        return res.status(400).json({ error: 'This onboarding request has already been submitted' });
+      }
+
+      // Get onboarding requirements
+      db.get(
+        `SELECT email_needed, device_needed, systems_json, employee_name, position, department, location, start_date, device_type, vpn_required
+         FROM onboarding_requests WHERE request_id = ?`,
+        [requestId],
+        (err2, onboarding) => {
+          if (err2) {
+            logError('/api/onboarding/:id/submit', 'select_onboarding', err2, { requestId });
+            return res.status(500).json({ error: 'Failed to load onboarding details. Please try again.' });
+          }
+          if (!onboarding) {
+            return res.status(404).json({ error: 'Onboarding details not found' });
+          }
+
+          const needsEmail = !!onboarding.email_needed;
+          const needsDevice = !!onboarding.device_needed;
+          const systems = onboarding.systems_json ? JSON.parse(onboarding.systems_json) : [];
+          const employeeName = onboarding.employee_name;
+          const position = onboarding.position;
+          const deviceType = onboarding.device_type || '';
+          const vpnRequired = !!onboarding.vpn_required;
+
+          // Calculate expected child count
+          const expectedChildCount = (needsEmail ? 1 : 0) + (needsDevice ? 1 : 0) + systems.length;
+
+          if (expectedChildCount === 0) {
+            return res.status(400).json({ error: 'No IT requirements specified. Please add email, device, or system access requirements.' });
+          }
+
+          // Use transaction to create children atomically
+          db.run('BEGIN IMMEDIATE TRANSACTION', (beginErr) => {
+            if (beginErr) {
+              logError('/api/onboarding/:id/submit', 'begin_transaction', beginErr);
+              return res.status(500).json(formatErrorResponse(
+                beginErr,
+                'Failed to start transaction. Please try again.'
+              ));
+            }
+
             let childCount = 0;
             let hasError = false;
-            
+            const childRequests = [];
+
             // Email child request
             if (needsEmail) {
               const emailTitle = `Email Setup: ${employeeName}`;
@@ -1331,13 +1446,14 @@ app.post('/api/onboarding', authRequired, requireRole('SUPER_ADMIN', 'HR_ADMIN')
                                        assigned_role, workflow_status, current_step, parent_request_id, request_scope)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                 ['ONBOARDING_EMAIL', emailTitle, emailDesc, req.user.fullName, req.user.department || '', emailStatus,
-                 employeeId, 'IT_DEVICES_EMAIL_ADMIN', 'SUBMITTED', 'SUBMITTED', parentRequestId, 'ONBOARDING'],
-                function(err4) {
-                  if (err4) {
+                 userId, 'IT_DEVICES_EMAIL_ADMIN', 'SUBMITTED', 'SUBMITTED', requestId, 'ONBOARDING'],
+                function(err3) {
+                  if (err3) {
                     hasError = true;
-                    console.warn('[ONBOARDING] Failed to create email child:', err4);
+                    console.warn('[ONBOARDING] Failed to create email child:', err3);
                   } else {
                     childCount++;
+                    childRequests.push({ id: this.lastID, type: 'ONBOARDING_EMAIL' });
                   }
                 }
               );
@@ -1354,13 +1470,14 @@ app.post('/api/onboarding', authRequired, requireRole('SUPER_ADMIN', 'HR_ADMIN')
                                        assigned_role, workflow_status, current_step, parent_request_id, request_scope)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                 ['ONBOARDING_DEVICE', deviceTitle, deviceDesc, req.user.fullName, req.user.department || '', deviceStatus,
-                 employeeId, 'IT_DEVICES_EMAIL_ADMIN', 'SUBMITTED', 'SUBMITTED', parentRequestId, 'ONBOARDING'],
-                function(err5) {
-                  if (err5) {
+                 userId, 'IT_DEVICES_EMAIL_ADMIN', 'SUBMITTED', 'SUBMITTED', requestId, 'ONBOARDING'],
+                function(err4) {
+                  if (err4) {
                     hasError = true;
-                    console.warn('[ONBOARDING] Failed to create device child:', err5);
+                    console.warn('[ONBOARDING] Failed to create device child:', err4);
                   } else {
                     childCount++;
+                    childRequests.push({ id: this.lastID, type: 'ONBOARDING_DEVICE' });
                   }
                 }
               );
@@ -1387,79 +1504,66 @@ app.post('/api/onboarding', authRequired, requireRole('SUPER_ADMIN', 'HR_ADMIN')
                                        assigned_role, workflow_status, current_step, parent_request_id, system_key, request_scope)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                 ['ONBOARDING_SYSTEM', systemTitle, systemDesc, req.user.fullName, req.user.department || '', systemStatus,
-                 employeeId, systemRole, 'SUBMITTED', 'SUBMITTED', parentRequestId, systemKey, 'ONBOARDING'],
-                function(err6) {
-                  if (err6) {
+                 userId, systemRole, 'SUBMITTED', 'SUBMITTED', requestId, systemKey, 'ONBOARDING'],
+                function(err5) {
+                  if (err5) {
                     hasError = true;
-                    console.warn(`[ONBOARDING] Failed to create system child for ${systemKey}:`, err6);
+                    console.warn(`[ONBOARDING] Failed to create system child for ${systemKey}:`, err5);
                   } else {
                     childCount++;
+                    childRequests.push({ id: this.lastID, type: 'ONBOARDING_SYSTEM', systemKey });
                   }
                 }
               );
             });
-            
-            // Update parent workflow to IT_IN_PROGRESS if we have children
-            if (expectedChildCount > 0) {
-              db.run(
-                `UPDATE requests SET workflow_status = ?, current_step = ?, status = ? WHERE id = ?`,
-                ['IT_IN_PROGRESS', 'IT_IN_PROGRESS', 'IN_PROGRESS', parentRequestId],
-                (err7) => {
-                  if (err7) {
-                    console.warn('[ONBOARDING] Failed to update parent workflow status:', err7);
-                  }
+
+            // Update parent workflow to IT_IN_PROGRESS and change assigned_role to IT_ADMIN
+            db.run(
+              `UPDATE requests SET workflow_status = ?, current_step = ?, status = ?, assigned_role = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+              ['IT_IN_PROGRESS', 'IT_IN_PROGRESS', 'IN_PROGRESS', 'IT_ADMIN', requestId],
+              (err6) => {
+                if (err6) {
+                  console.warn('[ONBOARDING] Failed to update parent workflow status:', err6);
                 }
-              );
-            }
-            
+              }
+            );
+
             // Commit transaction
             db.run('COMMIT', (commitErr) => {
               if (commitErr) {
-                logError('/api/onboarding', 'commit_transaction', commitErr);
+                logError('/api/onboarding/:id/submit', 'commit_transaction', commitErr);
                 return res.status(500).json(formatErrorResponse(
                   commitErr,
                   'Failed to commit transaction. Please try again.'
                 ));
               }
               
-              // Log action (non-blocking)
-              const childCountMsg = hasError ? `${childCount}/${expectedChildCount}` : `${expectedChildCount}`;
-              logRequestAction(parentRequestId, 'CREATE', null, workflowStatus, employeeId, 
-                `Onboarding request created for ${employeeName} with ${childCountMsg} child request(s)`, (logErr) => {
+              // Log action
+              logRequestAction(requestId, 'HR_SUBMIT', 'HR_REVIEW', 'IT_IN_PROGRESS', userId, 
+                `HR submitted onboarding - created ${childCount} child request(s)`, (logErr) => {
                   if (logErr) {
-                    console.warn('[AUDIT] Failed to log onboarding request action (non-critical):', logErr);
+                    console.warn('[AUDIT] Failed to log HR submit action (non-critical):', logErr);
                   }
                 });
 
               return res.json({
-                id: parentRequestId,
-                requestId: parentRequestId,
-                type: 'ONBOARDING',
-                title,
-                requesterName,
-                employeeName,
-                position,
-                location,
-                startDate,
-                deviceType: deviceType || '',
-                vpnRequired: !!vpnRequired,
+                id: requestId,
+                requestId: requestId,
                 status: 'IN_PROGRESS',
                 workflowStatus: 'IT_IN_PROGRESS',
                 currentStep: 'IT_IN_PROGRESS',
-                emailNeeded: needsEmail,
-                deviceNeeded: needsDevice,
-                systemsRequested: systems,
-                childRequestsCount: expectedChildCount,
+                childRequests: childRequests,
+                childRequestsCount: childCount,
                 message: hasError 
-                  ? `Onboarding created. Note: Some child requests may have failed (${childCount}/${expectedChildCount} created).`
-                  : `Onboarding created with ${expectedChildCount} child request(s)`
+                  ? `Onboarding submitted. Note: Some child requests may have failed (${childCount}/${expectedChildCount} created).`
+                  : `Onboarding submitted successfully. ${childCount} child request(s) created.`
               });
             });
-          }
-        );
-      }
-    );
-  });
+          });
+        }
+      );
+    }
+  );
 });
 
 // ---------------- Requests List (for "My Requests") ----------------
@@ -1783,12 +1887,15 @@ app.patch('/api/requests/:id/status', authRequired, (req, res) => {
             return res.status(403).json({ error: 'You can only update requests assigned to your role' });
           }
         } else if (request.type === 'IT') {
-          // IT requests: IT_ADMIN (super admin) OR assigned system admin can update
+          // IT requests: IT_ADMIN (super admin) can update ANY IT request
+          // System admins can only update requests assigned to their role
           // HR_ADMIN cannot update IT requests
           if (userRole === 'HR_ADMIN') {
             return res.status(403).json({ error: 'HR Admin can view but not edit IT requests. Only IT Admin or assigned admin can update.' });
-          } else if (userRole !== 'IT_ADMIN' && request.assignedRole !== userRole) {
-            return res.status(403).json({ error: 'Only IT Admin or assigned admin can update this IT request' });
+          } else if (userRole === 'IT_ADMIN') {
+            // IT_ADMIN can update any IT request - allow through
+          } else if (request.assignedRole !== userRole) {
+            return res.status(403).json({ error: 'You can only update IT requests assigned to your role' });
           }
         } else if (request.type === 'CAR_BOOKING') {
           // Car bookings: FLEET_ADMIN can update (but cancellation is handled above)
@@ -1806,12 +1913,15 @@ app.patch('/api/requests/:id/status', authRequired, (req, res) => {
       const updateFields = [];
       const updateValues = [];
       
-      // Special handling for onboarding: when moving to IT_SETUP, change assigned_role
-      if (request.type === 'ONBOARDING' && (currentStep === 'IT_SETUP' || workflowStatus === 'IT_SETUP')) {
-        if (userRole === 'HR_ADMIN' || userRole === 'SUPER_ADMIN') {
-          updateFields.push('assigned_role = ?');
-          updateValues.push('IT_ADMIN');
-          // Status will be auto-updated below based on workflow step
+      // Special handling for onboarding: when moving to IT_IN_PROGRESS, change assigned_role
+      // (This is now handled in the submit endpoint, but kept here for backward compatibility)
+      if (request.type === 'ONBOARDING' && (currentStep === 'IT_IN_PROGRESS' || workflowStatus === 'IT_IN_PROGRESS')) {
+        if (userRole === 'HR_ADMIN' || userRole === 'SUPER_ADMIN' || userRole === 'IT_ADMIN') {
+          // Only update if not already IT_ADMIN
+          if (request.assignedRole !== 'IT_ADMIN') {
+            updateFields.push('assigned_role = ?');
+            updateValues.push('IT_ADMIN');
+          }
         }
       }
       
@@ -1837,10 +1947,19 @@ app.patch('/api/requests/:id/status', authRequired, (req, res) => {
         }
       }
       
-      // Explicit status update (only if not auto-updated above)
-      if (status && !((request.type === 'ONBOARDING' || request.type === 'IT' || request.type === 'CAR_BOOKING') && (currentStep || workflowStatus))) {
-        updateFields.push('status = ?');
-        updateValues.push(status);
+      // Explicit status update
+      // For IT requests: allow direct status updates (no workflow step mapping required)
+      // For ONBOARDING/CAR_BOOKING: only update if not auto-updated above
+      if (status) {
+        if (request.type === 'IT') {
+          // IT requests: allow direct status updates (no workflow step mapping)
+          updateFields.push('status = ?');
+          updateValues.push(status);
+        } else if (!((request.type === 'ONBOARDING' || request.type === 'CAR_BOOKING') && (currentStep || workflowStatus))) {
+          // For other types, only if not auto-updated above
+          updateFields.push('status = ?');
+          updateValues.push(status);
+        }
       }
       
       // Special handling for car booking cancellation

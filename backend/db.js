@@ -3,7 +3,7 @@ const sqlite3 = require('sqlite3').verbose();
 const fs = require('fs');
 const path = require('path');
 
-const dbPath = './internal_system.db';
+const dbPath = process.env.DB_PATH || path.join(__dirname, 'internal_system.db');
 
 // Helper to check and clean up stale lock files
 const checkStaleLocks = () => {
