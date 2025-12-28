@@ -448,9 +448,71 @@ function initializeTables() {
       ], (err) => {
         if (err) {
           console.error('[MIGRATION] Failed to ensure employees table schema:', err);
-        } else {
-          console.log('[MIGRATION] employees table schema verified');
+          markDbReady();
+          return;
         }
+        console.log('[MIGRATION] employees table schema verified');
+        
+        // Seed / ensure required employees exist (insert missing only) - MUST run after migration
+        db.get(`SELECT COUNT(*) AS count FROM employees`, (err, row) => {
+          if (err) {
+            console.error('Error counting employees', err);
+            markDbReady();
+            return;
+          }
+
+          const crypto = require('crypto');
+          const hashPassword = (password) =>
+            crypto.createHash('sha256').update(password).digest('hex');
+
+          // ✅ Always ensure these exist (won't duplicate because email is UNIQUE)
+          const requiredEmployees = [
+            // email, password_hash, full_name, department, role, is_active, is_lead
+            ['admin@housing.gov.om', hashPassword('password123'), 'Super Admin', 'Administration', 'SUPER_ADMIN', 1, 1],
+            ['it@housing.gov.om', hashPassword('password123'), 'IT Admin', 'IT', 'IT_ADMIN', 1, 0],
+            ['hr@housing.gov.om', hashPassword('password123'), 'HR Admin', 'HR', 'HR_ADMIN', 1, 1],
+            ['fleet@housing.gov.om', hashPassword('password123'), 'Fleet Admin', 'Fleet', 'FLEET_ADMIN', 1, 0],
+            ['ismail@housing.gov.om', hashPassword('password123'), 'Ismail Al Abdali', 'Programmer', 'EMPLOYEE', 1, 0],
+            // New IT admin roles
+            ['m365@housing.gov.om', hashPassword('password123'), 'M365 Admin', 'IT', 'IT_M365_ADMIN', 1, 0],
+            ['bi@housing.gov.om', hashPassword('password123'), 'BI Admin', 'IT', 'IT_BI_ADMIN', 1, 0],
+            ['aconex@housing.gov.om', hashPassword('password123'), 'Aconex Admin', 'IT', 'IT_ACONEX_ADMIN', 1, 0],
+            ['autodesk@housing.gov.om', hashPassword('password123'), 'Autodesk Admin', 'IT', 'IT_AUTODESK_ADMIN', 1, 0],
+            ['p6@housing.gov.om', hashPassword('password123'), 'P6 Admin', 'IT', 'IT_P6_ADMIN', 1, 0],
+            ['risk@housing.gov.om', hashPassword('password123'), 'Risk Admin', 'IT', 'IT_RISK_ADMIN', 1, 0],
+            ['devices@housing.gov.om', hashPassword('password123'), 'Devices/Email Admin', 'IT', 'IT_DEVICES_EMAIL_ADMIN', 1, 0],
+          ];
+
+          const stmt = db.prepare(`
+            INSERT OR IGNORE INTO employees
+            (email, password_hash, full_name, department, role, is_active, is_lead)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+          `);
+
+          requiredEmployees.forEach((e) => stmt.run(e));
+
+          stmt.finalize((finalizeErr) => {
+            if (finalizeErr) {
+              console.error('Error finalizing employee ensure statement:', finalizeErr);
+            } else {
+              console.log('[DB] Ensured required employee accounts exist (inserted missing only).');
+              console.log('Demo login credentials (password: password123):');
+              console.log('  - admin@housing.gov.om (SUPER_ADMIN)');
+              console.log('  - it@housing.gov.om (IT_ADMIN)');
+              console.log('  - hr@housing.gov.om (HR_ADMIN)');
+              console.log('  - fleet@housing.gov.om (FLEET_ADMIN)');
+              console.log('  - ismail@housing.gov.om (EMPLOYEE)');
+              console.log('  - m365@housing.gov.om (IT_M365_ADMIN)');
+              console.log('  - bi@housing.gov.om (IT_BI_ADMIN)');
+              console.log('  - aconex@housing.gov.om (IT_ACONEX_ADMIN)');
+              console.log('  - autodesk@housing.gov.om (IT_AUTODESK_ADMIN)');
+              console.log('  - p6@housing.gov.om (IT_P6_ADMIN)');
+              console.log('  - risk@housing.gov.om (IT_RISK_ADMIN)');
+              console.log('  - devices@housing.gov.om (IT_DEVICES_EMAIL_ADMIN)');
+            }
+            markDbReady();
+          });
+        });
       });
     });
 
@@ -471,67 +533,6 @@ function initializeTables() {
         console.log('Seeded vehicles table');
       }
     });
-
-    // Seed / ensure required employees exist (insert missing only)
-db.get(`SELECT COUNT(*) AS count FROM employees`, (err, row) => {
-  if (err) {
-    console.error('Error counting employees', err);
-    markDbReady();
-    return;
-  }
-
-  const crypto = require('crypto');
-  const hashPassword = (password) =>
-    crypto.createHash('sha256').update(password).digest('hex');
-
-  // ✅ Always ensure these exist (won't duplicate because email is UNIQUE)
-  const requiredEmployees = [
-    // email, password_hash, full_name, department, role, is_active, is_lead
-    ['admin@housing.gov.om', hashPassword('password123'), 'Super Admin', 'Administration', 'SUPER_ADMIN', 1, 1],
-    ['it@housing.gov.om', hashPassword('password123'), 'IT Admin', 'IT', 'IT_ADMIN', 1, 0],
-    ['hr@housing.gov.om', hashPassword('password123'), 'HR Admin', 'HR', 'HR_ADMIN', 1, 1],
-    ['fleet@housing.gov.om', hashPassword('password123'), 'Fleet Admin', 'Fleet', 'FLEET_ADMIN', 1, 0],
-    ['ismail@housing.gov.om', hashPassword('password123'), 'Ismail Al Abdali', 'Programmer', 'EMPLOYEE', 1, 0],
-    // New IT admin roles
-    ['m365@housing.gov.om', hashPassword('password123'), 'M365 Admin', 'IT', 'IT_M365_ADMIN', 1, 0],
-    ['bi@housing.gov.om', hashPassword('password123'), 'BI Admin', 'IT', 'IT_BI_ADMIN', 1, 0],
-    ['aconex@housing.gov.om', hashPassword('password123'), 'Aconex Admin', 'IT', 'IT_ACONEX_ADMIN', 1, 0],
-    ['autodesk@housing.gov.om', hashPassword('password123'), 'Autodesk Admin', 'IT', 'IT_AUTODESK_ADMIN', 1, 0],
-    ['p6@housing.gov.om', hashPassword('password123'), 'P6 Admin', 'IT', 'IT_P6_ADMIN', 1, 0],
-    ['risk@housing.gov.om', hashPassword('password123'), 'Risk Admin', 'IT', 'IT_RISK_ADMIN', 1, 0],
-    ['devices@housing.gov.om', hashPassword('password123'), 'Devices/Email Admin', 'IT', 'IT_DEVICES_EMAIL_ADMIN', 1, 0],
-  ];
-
-  const stmt = db.prepare(`
-    INSERT OR IGNORE INTO employees
-    (email, password_hash, full_name, department, role, is_active, is_lead)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `);
-
-  requiredEmployees.forEach((e) => stmt.run(e));
-
-  stmt.finalize((finalizeErr) => {
-    if (finalizeErr) {
-      console.error('Error finalizing employee ensure statement:', finalizeErr);
-    } else {
-      console.log('[DB] Ensured required employee accounts exist (inserted missing only).');
-      console.log('Demo login credentials (password: password123):');
-      console.log('  - admin@housing.gov.om (SUPER_ADMIN)');
-      console.log('  - it@housing.gov.om (IT_ADMIN)');
-      console.log('  - hr@housing.gov.om (HR_ADMIN)');
-      console.log('  - fleet@housing.gov.om (FLEET_ADMIN)');
-      console.log('  - ismail@housing.gov.om (EMPLOYEE)');
-      console.log('  - m365@housing.gov.om (IT_M365_ADMIN)');
-      console.log('  - bi@housing.gov.om (IT_BI_ADMIN)');
-      console.log('  - aconex@housing.gov.om (IT_ACONEX_ADMIN)');
-      console.log('  - autodesk@housing.gov.om (IT_AUTODESK_ADMIN)');
-      console.log('  - p6@housing.gov.om (IT_P6_ADMIN)');
-      console.log('  - risk@housing.gov.om (IT_RISK_ADMIN)');
-      console.log('  - devices@housing.gov.om (IT_DEVICES_EMAIL_ADMIN)');
-    }
-    markDbReady();
-  });
-});
   }); // Close db.serialize(() => { ... })
 }
 
