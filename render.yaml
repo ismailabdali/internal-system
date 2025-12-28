@@ -8,6 +8,5 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
-      - key: PORT
-        value: 4000
+      # PORT is automatically set by Render, don't override it
 

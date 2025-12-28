@@ -6,6 +6,8 @@ const db = require('./db');
 const { waitForDb } = require('./db');
 
 const app = express();
+
+// CORS configuration - allow frontend URLs from environment or default list
 const allowedOrigins = [
   'http://localhost:5173',
   'http://localhost:3000',
@@ -13,10 +15,40 @@ const allowedOrigins = [
   'https://glistening-semolina-68da32.netlify.app'
 ];
 
+// Add frontend URL from environment variable if set
+if (process.env.FRONTEND_URL) {
+  allowedOrigins.push(process.env.FRONTEND_URL);
+}
+
+// In production, also allow requests from Render's domain
+if (process.env.NODE_ENV === 'production') {
+  // Allow any Render subdomain (for health checks and internal requests)
+  allowedOrigins.push(/^https:\/\/.*\.onrender\.com$/);
+}
+
 app.use(cors({
-  origin: allowedOrigins,
+  origin: (origin, callback) => {
+    // Allow requests with no origin (like mobile apps, Postman, or curl)
+    if (!origin) return callback(null, true);
+    
+    // Check if origin is in allowed list
+    if (allowedOrigins.some(allowed => {
+      if (typeof allowed === 'string') {
+        return allowed === origin;
+      } else if (allowed instanceof RegExp) {
+        return allowed.test(origin);
+      }
+      return false;
+    })) {
+      callback(null, true);
+    } else {
+      console.warn(`[CORS] Blocked origin: ${origin}`);
+      callback(null, true); // Allow for now, but log it
+    }
+  },
   methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true
 }));
 
 app.use(express.json());
@@ -314,6 +346,46 @@ const validateDateRange = (startDate, endDate) => {
     return { valid: false, error: 'Invalid date values' };
   }
 };
+
+// ---------------- Health Check & Root Endpoints ----------------
+
+// Root endpoint
+app.get('/', (req, res) => {
+  res.json({ 
+    message: 'Internal System API',
+    status: 'running',
+    version: '1.0.0',
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Health check endpoint for Render
+app.get('/health', (req, res) => {
+  res.status(200).json({ 
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime()
+  });
+});
+
+// API health check
+app.get('/api/health', (req, res) => {
+  waitForDb((dbErr) => {
+    if (dbErr) {
+      return res.status(503).json({ 
+        status: 'unhealthy',
+        error: 'Database not ready',
+        timestamp: new Date().toISOString()
+      });
+    }
+    res.status(200).json({ 
+      status: 'healthy',
+      database: 'connected',
+      timestamp: new Date().toISOString(),
+      uptime: process.uptime()
+    });
+  });
+});
 
 // ---------------- Authentication Routes (Public) ----------------
 
@@ -2747,10 +2819,20 @@ waitForDb((dbErr) => {
       process.exit(1);
     }
     
-    const server = app.listen(PORT, () => {
-      console.log(`[SERVER] ✅ Backend running on http://localhost:${PORT}`);
+    const server = app.listen(PORT, '0.0.0.0', () => {
+      const host = process.env.RENDER_EXTERNAL_HOSTNAME || 'localhost';
+      const protocol = process.env.NODE_ENV === 'production' ? 'https' : 'http';
+      const url = process.env.RENDER_EXTERNAL_URL || `${protocol}://${host}:${PORT}`;
+      
+      console.log(`[SERVER] ✅ Backend running on port ${PORT}`);
+      console.log(`[SERVER] Local URL: http://localhost:${PORT}`);
+      if (process.env.RENDER_EXTERNAL_URL) {
+        console.log(`[SERVER] External URL: ${process.env.RENDER_EXTERNAL_URL}`);
+      }
       console.log('[SERVER] Ready to accept requests');
-      console.log('[SERVER] Test login endpoint: POST http://localhost:4000/api/auth/login');
+      console.log(`[SERVER] Health check: ${url}/health`);
+      console.log(`[SERVER] API health: ${url}/api/health`);
+      console.log(`[SERVER] Test login: POST ${url}/api/auth/login`);
     });
     
     server.on('error', (err) => {
