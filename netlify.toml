@@ -1,10 +1,12 @@
 # Netlify configuration for Internal System
 
 [build]
-  # Build command for frontend
-  command = "cd frontend && npm install && npm run build"
-  # Publish directory
-  publish = "frontend/dist"
+  # Base directory - Netlify will run commands from here
+  base = "frontend"
+  # Build command for frontend (no cd needed since base is set)
+  command = "npm install && npm run build"
+  # Publish directory (relative to base)
+  publish = "dist"
 
 # Redirect all routes to index.html for SPA
 [[redirects]]
