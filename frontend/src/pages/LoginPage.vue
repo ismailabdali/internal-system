@@ -170,10 +170,24 @@ const handleLogin = async () => {
       throw fetchError;
     }
   } catch (e) {
+    console.error('[LOGIN] Error details:', {
+      name: e.name,
+      message: e.message,
+      stack: e.stack,
+      apiBase: apiBase
+    });
+    
     if (e.name === 'AbortError' || e.message.includes('aborted')) {
       loginError.value = 'Login request timed out. Please check your connection and try again.';
-    } else if (e.message.includes('Failed to fetch') || e.message.includes('NetworkError') || e.message.includes('ERR_')) {
-      loginError.value = 'Cannot connect to server. Please ensure the backend server is running on port 4000.';
+    } else if (e.message.includes('Failed to fetch') || e.message.includes('NetworkError') || e.message.includes('ERR_') || e.message.includes('load failed')) {
+      // Provide helpful error message with API URL for debugging
+      const apiUrl = apiBase.replace('/api', '');
+      loginError.value = `Cannot connect to server at ${apiUrl}. ` +
+        `If accessing from another device, ensure: ` +
+        `(1) Backend server is running, ` +
+        `(2) Server is accessible from this device, ` +
+        `(3) API URL is correct. ` +
+        `You can set it via ?apiUrl=http://SERVER_IP:4000 in the URL.`;
     } else {
       loginError.value = e.message || 'Login failed. Please check your credentials and try again.';
     }

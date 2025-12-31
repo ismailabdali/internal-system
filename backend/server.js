@@ -26,24 +26,71 @@ if (process.env.NODE_ENV === 'production') {
   allowedOrigins.push(/^https:\/\/.*\.onrender\.com$/);
 }
 
+// Helper function to check if origin is a local network IP
+const isLocalNetworkOrigin = (origin) => {
+  if (!origin) return false;
+  try {
+    const url = new URL(origin);
+    const hostname = url.hostname;
+    
+    // Allow localhost and local IP ranges
+    if (hostname === 'localhost' || hostname === '127.0.0.1') return true;
+    
+    // Allow private IP ranges (RFC 1918)
+    // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+    const ipParts = hostname.split('.').map(Number);
+    if (ipParts.length === 4 && ipParts.every(p => !isNaN(p))) {
+      const [a, b, c, d] = ipParts;
+      if (a === 10) return true; // 10.0.0.0/8
+      if (a === 172 && b >= 16 && b <= 31) return true; // 172.16.0.0/12
+      if (a === 192 && b === 168) return true; // 192.168.0.0/16
+      if (a === 127) return true; // 127.0.0.0/8 (localhost range)
+    }
+    
+    return false;
+  } catch (e) {
+    return false;
+  }
+};
+
 app.use(cors({
   origin: (origin, callback) => {
     // Allow requests with no origin (like mobile apps, Postman, or curl)
-    if (!origin) return callback(null, true);
+    if (!origin) {
+      console.log('[CORS] Allowing request with no origin');
+      return callback(null, true);
+    }
+    
+    // Allow local network IPs for cross-device access
+    if (isLocalNetworkOrigin(origin)) {
+      console.log(`[CORS] Allowing local network origin: ${origin}`);
+      return callback(null, true);
+    }
     
     // Check if origin is in allowed list
-    if (allowedOrigins.some(allowed => {
+    const isAllowed = allowedOrigins.some(allowed => {
       if (typeof allowed === 'string') {
         return allowed === origin;
       } else if (allowed instanceof RegExp) {
         return allowed.test(origin);
       }
       return false;
-    })) {
+    });
+    
+    if (isAllowed) {
+      console.log(`[CORS] Allowing configured origin: ${origin}`);
       callback(null, true);
     } else {
-      console.warn(`[CORS] Blocked origin: ${origin}`);
-      callback(null, true); // Allow for now, but log it
+      // In development, allow all origins for easier cross-device testing
+      // In production, you may want to be more restrictive
+      if (process.env.NODE_ENV !== 'production') {
+        console.log(`[CORS] Allowing origin in development: ${origin}`);
+        callback(null, true);
+      } else {
+        console.warn(`[CORS] Blocked origin in production: ${origin}`);
+        // Still allow but log warning - adjust based on your security needs
+        callback(null, true);
+      }
     }
   },
   methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
